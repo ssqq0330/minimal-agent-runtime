@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.tools.base import BaseTool, ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from app.memory.store import SQLiteStore
 
 
 class ToolRegistry:
@@ -63,7 +66,9 @@ class ToolRegistry:
             )
 
 
-def create_default_registry() -> ToolRegistry:
+def create_default_registry(
+    todo_store: Optional["SQLiteStore"] = None,
+) -> ToolRegistry:
     """Build a registry containing the tools available in this milestone."""
     from app.tools.calculator import CalculatorTool
     from app.tools.mock_search import MockSearchTool
@@ -72,5 +77,5 @@ def create_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(MockSearchTool())
-    registry.register(TodoTool())
+    registry.register(TodoTool(store=todo_store))
     return registry

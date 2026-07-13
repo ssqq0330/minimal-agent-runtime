@@ -137,3 +137,37 @@
 - Ownership and safety: Runtime never closes its injected LLM client. Known API
   keys are redacted recursively from returned messages and step records, and
   LLM boundary errors are converted to concise Runtime categories.
+
+## 2026-07-13: Stage 05A — SQLite Session、消息与 Todo 持久化
+
+- Why SQLite instead of an in-memory dictionary: Session and conversation data
+  must survive process restarts. SQLite provides transactional persistence in a
+  single local file without adding an ORM or database-server dependency.
+- Composite Session key: `(user_id, session_id)` is the primary key because a
+  Session id only needs to be unique for one user. This also lets two users use
+  the same visible Session id without sharing records.
+- No implicit Session creation: Messages and persistent Todos require an
+  existing Session. A typo or stale client identifier therefore fails clearly
+  instead of silently creating orphaned or unexpected conversation state.
+- Session-local Todo ids: The public Todo number is allocated inside each
+  `(user_id, session_id)` scope, so every Session begins at 1 and users see
+  compact identifiers relevant only to their current conversation.
+- Concurrent Todo allocation: A `todo_counters` row stores the next number for
+  each scope. Allocation and insertion run in one `BEGIN IMMEDIATE` transaction
+  under an `RLock`, preventing duplicate ids and preventing deleted ids from
+  being reused.
+- Short-lived connections: Every public operation opens, configures, commits or
+  rolls back, and closes its own connection. This avoids sharing a SQLite
+  connection across threads and makes connection ownership unambiguous.
+- Backward-compatible registry: `create_default_registry()` still constructs an
+  in-memory `TodoTool`. Persistence is opt-in through `todo_store=...`, so all
+  existing callers and tests retain their original behavior.
+- Data isolation: Every Session, message, Todo, and counter query binds both
+  `user_id` and `session_id`. SQL parameters are bound rather than interpolated,
+  and no lookup relies on `session_id` alone.
+- Foreign-key cascade: Messages, Todos, and their counter rows reference the
+  composite Session key with `ON DELETE CASCADE`. A Session deletion therefore
+  removes dependent state atomically without manual multi-query cleanup.
+- Why tests use `tmp_path`: Each test receives a separate disposable database,
+  has no dependency on execution order, and cannot pollute `data/agent.db` or a
+  developer's manual data.

@@ -2134,3 +2134,715 @@ python -m pytest tests/test_agent_runtime.py -q
 7. 不执行 git commit。
 8. 不执行 git push。
 ```
+
+## 2026-07-13: Stage 05A — SQLite Session、消息与 Todo 持久化
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、结构化输出解析器、Prompt
+stage-04：自行实现 Agent Runtime Loop
+
+现在开始第五阶段第一部分：SQLite Session、消息和 Todo 持久化。
+
+本阶段只实现数据存储层，以及持久化 Todo 接入能力。
+
+暂时不要实现：
+
+- Chat API
+- Session API 路由
+- 网页多窗口界面
+- Context 压缩
+- Runtime 自动读取和写入历史
+- Trace 持久化
+- 长期 Memory
+- git commit
+- git push
+
+项目使用 Python 3.10。
+
+禁止使用 ORM、LangChain、LangGraph 或其他 Agent 框架。
+使用 Python 标准库 sqlite3 自行实现。
+
+一、总体目标
+
+使用 SQLite 保存：
+
+1. 用户的多个 Session
+2. 每个 Session 的消息历史
+3. 每个 Session 独立的 Todo
+
+必须满足：
+
+用户 A 的 session-1 和 session-2 完全隔离。
+
+用户 B 即使使用相同的 session_id，也不能读取用户 A 的数据。
+
+程序重新启动、重新创建 SQLiteStore 对象后，历史数据仍然存在。
+
+二、数据库实现位置
+
+主要修改：
+
+app/memory/store.py
+
+按需要更新：
+
+app/memory/__init__.py
+app/tools/todo.py
+app/tools/registry.py
+app/tools/__init__.py
+
+新增测试：
+
+tests/test_memory_store.py
+tests/test_persistent_todo.py
+
+数据库默认位置：
+
+data/agent.db
+
+测试必须使用 pytest 的 tmp_path 创建临时数据库，禁止污染正式 data/agent.db。
+
+三、时间处理
+
+所有时间使用：
+
+datetime.now(timezone.utc).isoformat()
+
+即带 UTC 时区的 ISO 8601 字符串。
+
+不要使用没有时区信息的 datetime.utcnow()。
+
+四、数据结构
+
+在 app/memory/store.py 中实现以下数据类。
+
+1. SessionRecord
+
+字段：
+
+- user_id: str
+- session_id: str
+- title: str
+- created_at: str
+- updated_at: str
+
+提供：
+
+- to_dict()
+
+2. MessageRecord
+
+字段：
+
+- id: int
+- user_id: str
+- session_id: str
+- role: str
+- content: str
+- created_at: str
+- metadata: dict[str, Any] | None = None
+
+提供：
+
+- to_dict()
+
+3. TodoRecord
+
+字段：
+
+- id: int
+- user_id: str
+- session_id: str
+- content: str
+- completed: bool
+- created_at: str
+- completed_at: str | None = None
+
+提供：
+
+- to_dict()
+
+注意：
+
+TodoRecord.id 是当前 user_id + session_id 范围内的待办编号。
+
+每个 Session 的 Todo id 都从 1 开始。
+
+五、SQLiteStore 初始化
+
+实现：
+
+SQLiteStore(
+    db_path: str | Path = "data/agent.db"
+)
+
+要求：
+
+1. db_path 同时支持 str 和 pathlib.Path。
+2. 自动创建数据库父目录。
+3. 初始化时自动创建数据库表。
+4. 使用 sqlite3。
+5. 每个数据库连接设置：
+
+PRAGMA foreign_keys = ON
+
+6. 文件数据库建议设置：
+
+PRAGMA journal_mode = WAL
+
+7. 设置 sqlite3.Row 作为 row_factory。
+8. 不要在对象中长期共享一个 SQLite connection。
+9. 每个公开操作自行获取短生命周期连接。
+10. 使用上下文管理器正确提交和关闭连接。
+11. 增加 threading.RLock，保护初始化及必要的写操作。
+12. 提供 initialize()，重复执行不会报错。
+13. SQLiteStore 初始化后即可使用。
+
+六、数据库表
+
+实现以下表。
+
+1. sessions
+
+字段：
+
+- user_id TEXT NOT NULL
+- session_id TEXT NOT NULL
+- title TEXT NOT NULL
+- created_at TEXT NOT NULL
+- updated_at TEXT NOT NULL
+
+联合主键：
+
+PRIMARY KEY (user_id, session_id)
+
+2. messages
+
+字段：
+
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- user_id TEXT NOT NULL
+- session_id TEXT NOT NULL
+- role TEXT NOT NULL
+- content TEXT NOT NULL
+- metadata_json TEXT
+- created_at TEXT NOT NULL
+
+外键：
+
+FOREIGN KEY (user_id, session_id)
+REFERENCES sessions(user_id, session_id)
+ON DELETE CASCADE
+
+增加适合按 Session 和顺序查询消息的索引。
+
+3. todos
+
+字段：
+
+- user_id TEXT NOT NULL
+- session_id TEXT NOT NULL
+- todo_id INTEGER NOT NULL
+- content TEXT NOT NULL
+- completed INTEGER NOT NULL DEFAULT 0
+- created_at TEXT NOT NULL
+- completed_at TEXT
+
+联合主键：
+
+PRIMARY KEY (user_id, session_id, todo_id)
+
+外键：
+
+FOREIGN KEY (user_id, session_id)
+REFERENCES sessions(user_id, session_id)
+ON DELETE CASCADE
+
+增加适合按 Session 查询 Todo 的索引。
+
+七、输入校验
+
+所有公开方法都要进行基础校验。
+
+user_id：
+
+- 必须是字符串
+- 去除首尾空白后不能为空
+
+session_id：
+
+- 必须是字符串
+- 去除首尾空白后不能为空
+
+title：
+
+- 必须是字符串
+- 去除首尾空白后不能为空
+- 最大长度建议 200
+
+content：
+
+- 必须是字符串
+- 去除首尾空白后不能为空
+
+role：
+
+只允许：
+
+- user
+- assistant
+
+metadata：
+
+- 必须是 dict 或 None
+- 必须能够被 json.dumps 序列化
+
+todo_id：
+
+- 必须是大于 0 的整数
+- bool 不能被视为合法整数
+
+错误使用 ValueError 或清晰的自定义异常。
+
+八、Session 操作
+
+实现：
+
+create_session(
+    user_id: str,
+    session_id: str | None = None,
+    title: str = "新会话"
+) -> SessionRecord
+
+规则：
+
+1. session_id 为 None 时，使用 uuid.uuid4().hex 生成。
+2. 同一个 user_id 下不能创建重复 session_id。
+3. 不同 user_id 可以使用相同 session_id。
+4. 重复创建时返回明确错误，不要静默覆盖。
+
+实现：
+
+get_session(
+    user_id: str,
+    session_id: str
+) -> SessionRecord | None
+
+必须同时匹配 user_id 和 session_id。
+
+实现：
+
+list_sessions(
+    user_id: str
+) -> list[SessionRecord]
+
+规则：
+
+- 只返回当前用户的 Session
+- 按 updated_at 降序
+- 最新更新的 Session 在前
+
+实现：
+
+update_session_title(
+    user_id: str,
+    session_id: str,
+    title: str
+) -> SessionRecord
+
+Session 不存在时返回明确错误。
+
+实现：
+
+touch_session(
+    user_id: str,
+    session_id: str
+) -> SessionRecord
+
+更新 updated_at。
+
+实现：
+
+delete_session(
+    user_id: str,
+    session_id: str
+) -> bool
+
+规则：
+
+- 删除存在的 Session 返回 True
+- 不存在返回 False
+- 删除 Session 后，其 messages 和 todos 应通过外键级联删除
+- 不能删除其他用户相同 session_id 的 Session
+
+九、消息操作
+
+实现：
+
+add_message(
+    user_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+    metadata: dict[str, Any] | None = None
+) -> MessageRecord
+
+规则：
+
+1. Session 必须已经存在。
+2. 不允许自动创建 Session。
+3. 保存消息后更新 Session.updated_at。
+4. metadata 使用 JSON 保存。
+5. ensure_ascii=False。
+6. 返回保存后的 MessageRecord。
+
+实现：
+
+list_messages(
+    user_id: str,
+    session_id: str,
+    limit: int | None = None
+) -> list[MessageRecord]
+
+规则：
+
+1. 必须只读取指定用户和 Session。
+2. 默认返回全部消息。
+3. 按消息 id 升序，也就是从旧到新。
+4. limit 必须是大于 0 的整数。
+5. limit 表示返回最近 N 条消息。
+6. 即使查询最近 N 条，最终返回顺序仍然为旧到新。
+7. Session 不存在时返回空列表或明确的统一行为，并在测试中固定下来。
+8. 不允许读取其他用户的数据。
+
+实现：
+
+count_messages(
+    user_id: str,
+    session_id: str
+) -> int
+
+实现：
+
+clear_messages(
+    user_id: str,
+    session_id: str
+) -> int
+
+返回删除的消息数量，但不删除 Session。
+
+十、Todo 操作
+
+在 SQLiteStore 中实现：
+
+add_todo(
+    user_id: str,
+    session_id: str,
+    content: str
+) -> TodoRecord
+
+规则：
+
+1. Session 必须存在。
+2. todo_id 在当前 user_id + session_id 内从 1 开始递增。
+3. 不同 Session 各自从 1 开始。
+4. 删除 Todo 后，不复用旧 id。
+5. 为避免并发重复 id，写入过程使用事务。
+6. 可使用 BEGIN IMMEDIATE 加写锁。
+7. 保存后更新 Session.updated_at。
+
+实现：
+
+list_todos(
+    user_id: str,
+    session_id: str
+) -> list[TodoRecord]
+
+按 todo_id 升序。
+
+实现：
+
+complete_todo(
+    user_id: str,
+    session_id: str,
+    todo_id: int
+) -> TodoRecord
+
+规则：
+
+- 设置 completed=True
+- 设置 completed_at
+- 已完成的 Todo 再次完成应保持幂等，不报错
+- Todo 不存在时返回明确错误
+
+实现：
+
+delete_todo(
+    user_id: str,
+    session_id: str,
+    todo_id: int
+) -> bool
+
+存在时返回 True，不存在时返回 False。
+
+实现：
+
+clear_todos(
+    user_id: str,
+    session_id: str
+) -> int
+
+返回删除数量。
+
+十一、持久化 TodoTool
+
+当前 TodoTool 使用内存保存。
+
+要求在不破坏现有测试和行为的基础上，让它支持可选 SQLiteStore。
+
+修改 TodoTool 构造方法，例如：
+
+TodoTool(store: SQLiteStore | None = None)
+
+规则：
+
+1. store 为 None 时，继续使用当前线程安全内存模式。
+2. store 不为 None 时，使用 SQLiteStore 的 Todo 方法。
+3. 工具对外 Schema、名称和 action 行为保持不变。
+4. add：
+   - 如果 SQLite Session 不存在，返回清晰失败 ToolResult
+5. list、complete、delete 使用 context.user_id 和 context.session_id。
+6. 返回的 Todo 字段与之前兼容。
+7. clear()：
+   - 内存模式继续清空内存数据
+   - SQLite 模式不得危险地删除所有用户数据库数据
+   - SQLite 模式可以明确要求指定 context，或者提供安全的测试辅助方法
+8. 不允许 TodoTool 自行创建 Session。
+
+十二、默认工具注册
+
+修改：
+
+create_default_registry(...)
+
+使其支持可选参数：
+
+create_default_registry(
+    todo_store: SQLiteStore | None = None
+) -> ToolRegistry
+
+规则：
+
+1. 不传 todo_store 时，行为与之前完全相同。
+2. 传入 todo_store 时，TodoTool 使用 SQLite 持久化。
+3. calculator 和 search 不受影响。
+4. 保持所有已有调用兼容。
+
+十三、模块导出
+
+更新 app/memory/__init__.py，导出：
+
+- SQLiteStore
+- SessionRecord
+- MessageRecord
+- TodoRecord
+
+保留其他已有导出。
+
+十四、数据库异常处理
+
+可以定义：
+
+MemoryStoreError
+SessionNotFoundError
+TodoNotFoundError
+DuplicateSessionError
+
+要求：
+
+1. 错误分类清晰。
+2. 不向调用者暴露很长的原始 SQL。
+3. 不泄露 API Key。
+4. 不使用宽泛 except Exception 吞掉编程错误。
+5. sqlite3.IntegrityError 应在适当位置转换为明确错误。
+6. 数据库损坏等 sqlite3.Error 可以转换为 MemoryStoreError。
+
+十五、测试 SQLiteStore
+
+新增：
+
+tests/test_memory_store.py
+
+至少覆盖：
+
+初始化：
+
+1. 创建临时数据库。
+2. 自动创建父目录。
+3. 重复 initialize 不报错。
+4. 数据库文件重新打开后数据仍然存在。
+
+Session：
+
+5. 创建指定 session_id。
+6. 自动生成 session_id。
+7. 默认标题为新会话。
+8. 同一用户重复 session_id 失败。
+9. 不同用户可以使用相同 session_id。
+10. get_session 正常。
+11. get_session 不会读取其他用户数据。
+12. list_sessions 只返回当前用户。
+13. list_sessions 按 updated_at 降序。
+14. update_session_title 正常。
+15. 更新不存在 Session 失败。
+16. touch_session 更新 updated_at。
+17. delete_session 正常。
+18. 删除不存在 Session 返回 False。
+19. 用户 A 不能删除用户 B 的同名 Session。
+
+消息：
+
+20. 添加 user 消息。
+21. 添加 assistant 消息。
+22. Session 不存在时添加失败。
+23. 非法 role 失败。
+24. 空内容失败。
+25. metadata 保存并恢复。
+26. metadata 含中文能够正确恢复。
+27. 不可 JSON 序列化 metadata 失败。
+28. list_messages 按顺序返回。
+29. limit 返回最近 N 条且顺序正确。
+30. limit 非法失败。
+31. count_messages 正确。
+32. clear_messages 返回删除数量。
+33. 不同 Session 消息隔离。
+34. 不同用户消息隔离。
+35. 添加消息会更新 Session.updated_at。
+
+Todo：
+
+36. 第一个 Todo id 为 1。
+37. 第二个 Todo id 为 2。
+38. 不同 Session 都从 id 1 开始。
+39. 不同用户 Todo 隔离。
+40. list_todos 按 id 排序。
+41. complete_todo 正常。
+42. completed_at 被设置。
+43. 重复 complete 幂等。
+44. 完成不存在 Todo 失败。
+45. delete_todo 正常。
+46. 删除不存在 Todo 返回 False。
+47. 删除后新增 Todo 不复用旧 id。
+48. clear_todos 返回删除数量。
+49. 添加 Todo 会更新 Session.updated_at。
+50. Session 不存在时添加 Todo 失败。
+
+级联删除：
+
+51. 删除 Session 后消息被删除。
+52. 删除 Session 后 Todo 被删除。
+53. 删除用户 A 的 Session 不影响用户 B 的同名 Session。
+
+校验：
+
+54. 空 user_id 失败。
+55. 空 session_id 失败。
+56. 空 title 失败。
+57. 空 Todo content 失败。
+58. bool 类型 todo_id 失败。
+59. todo_id 小于等于 0 失败。
+
+十六、测试持久化 TodoTool
+
+新增：
+
+tests/test_persistent_todo.py
+
+至少覆盖：
+
+1. 传入 SQLiteStore 后 add 正常。
+2. list 正常。
+3. complete 正常。
+4. delete 正常。
+5. 数据重新创建 TodoTool 后仍存在。
+6. 数据重新创建 SQLiteStore 后仍存在。
+7. 不同 Session 隔离。
+8. 不同 user 隔离。
+9. Session 不存在时 add 返回 success=false。
+10. 不存在 todo_id 返回明确失败。
+11. create_default_registry(todo_store=store) 使用持久化 Todo。
+12. create_default_registry() 仍然使用原有内存 Todo。
+13. calculator 不受 todo_store 影响。
+14. search 不受 todo_store 影响。
+15. 现有 tests/test_tools.py 全部继续通过。
+
+十七、安全与兼容要求
+
+1. 所有 SQL 使用参数绑定，不拼接用户输入。
+2. 不使用 eval 或 exec。
+3. 不增加第三方依赖。
+4. 不修改 LLM Client。
+5. 不修改 Agent Runtime。
+6. 不修改 parser。
+7. 不修改健康检查接口。
+8. 不创建或提交真实 data/agent.db。
+9. .gitignore 中继续忽略：
+
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+10. 保证现有全部测试继续通过。
+
+十八、文档
+
+更新 README，增加：
+
+1. SQLite 持久化说明。
+2. 数据库默认位置 data/agent.db。
+3. Session 使用 user_id + session_id 联合隔离。
+4. 消息和 Todo 都归属于 Session。
+5. 删除 Session 会级联删除消息与 Todo。
+6. 当前尚未接入网页与 Runtime 自动历史恢复。
+7. 下一步会把 Runtime 接入持久化历史。
+
+将本阶段完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+在 docs/PROBLEM_SOLVING.md 记录：
+
+1. 为什么使用 SQLite 而不是内存字典。
+2. 为什么 Session 使用 user_id + session_id 联合主键。
+3. 为什么消息不允许自动创建 Session。
+4. 为什么 Todo id 要在 Session 内独立递增。
+5. 如何避免多个 Todo 并发生成相同 id。
+6. 为什么数据库连接采用短生命周期。
+7. 为什么 default registry 保持内存模式兼容。
+8. 如何保证用户和 Session 数据隔离。
+9. 为什么使用外键级联删除。
+10. 为什么测试使用 tmp_path。
+
+十九、完成后
+
+1. 运行完整测试：
+
+python -m pytest -q
+
+2. 单独运行：
+
+python -m pytest tests/test_memory_store.py tests/test_persistent_todo.py -q
+
+3. 修复全部失败。
+4. 列出创建和修改的文件。
+5. 说明数据库表设计。
+6. 说明 user_id + session_id 隔离如何实现。
+7. 给出 CMD 下的手动持久化测试命令。
+8. 不运行真实 LLM API。
+9. 不执行 git commit。
+10. 不执行 git push。
+```
