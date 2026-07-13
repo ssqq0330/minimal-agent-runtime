@@ -1,0 +1,20 @@
+:root {
+  color: #1f2937;
+  background: #f8fafc;
+  font-family: Arial, sans-serif;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+}
+
+.page {
+  text-align: center;
+}
+
+.hint {
+  color: #64748b;
+}

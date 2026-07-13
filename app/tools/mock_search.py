@@ -1,0 +1,1 @@
+"""Reserved mock search tool."""
