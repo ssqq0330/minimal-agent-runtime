@@ -167,10 +167,50 @@ class SQLiteStore:
                                 ON DELETE CASCADE
                         );
 
+                        CREATE TABLE IF NOT EXISTS agent_runs (
+                            run_id TEXT PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('running', 'completed', 'failed')
+                            ),
+                            user_input TEXT NOT NULL,
+                            final_answer TEXT,
+                            error_type TEXT,
+                            error_message TEXT,
+                            total_llm_calls INTEGER NOT NULL DEFAULT 0,
+                            total_tool_calls INTEGER NOT NULL DEFAULT 0,
+                            started_at TEXT NOT NULL,
+                            finished_at TEXT,
+                            FOREIGN KEY (user_id, session_id)
+                                REFERENCES sessions(user_id, session_id)
+                                ON DELETE CASCADE
+                        );
+
+                        CREATE TABLE IF NOT EXISTS trace_events (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            run_id TEXT NOT NULL,
+                            sequence INTEGER NOT NULL,
+                            event_type TEXT NOT NULL,
+                            step_number INTEGER,
+                            payload_json TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            UNIQUE (run_id, sequence),
+                            FOREIGN KEY (run_id)
+                                REFERENCES agent_runs(run_id)
+                                ON DELETE CASCADE
+                        );
+
                         CREATE INDEX IF NOT EXISTS idx_messages_session_order
                             ON messages(user_id, session_id, id);
                         CREATE INDEX IF NOT EXISTS idx_todos_session_order
                             ON todos(user_id, session_id, todo_id);
+                        CREATE INDEX IF NOT EXISTS idx_agent_runs_session_started
+                            ON agent_runs(user_id, session_id, started_at);
+                        CREATE INDEX IF NOT EXISTS idx_agent_runs_status_started
+                            ON agent_runs(status, started_at);
+                        CREATE INDEX IF NOT EXISTS idx_trace_events_run_sequence
+                            ON trace_events(run_id, sequence);
                         """
                     )
             except sqlite3.Error as error:
@@ -506,6 +546,283 @@ class SQLiteStore:
                 raise MemoryStoreError("Failed to clear messages.") from error
         return cursor.rowcount
 
+    def create_trace_run(
+        self,
+        run_id: str,
+        user_id: str,
+        session_id: str,
+        user_input: str,
+    ) -> Dict[str, Any]:
+        """Create a running Trace and its first event atomically."""
+        run_id = self._validate_text(run_id, "run_id")
+        user_id, session_id = self._validate_scope(user_id, session_id)
+        user_input = self._validate_text(user_input, "user_input")
+        timestamp = self._now()
+        payload_json = json.dumps({"status": "running"}, ensure_ascii=False)
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    self._require_session(connection, user_id, session_id)
+                    connection.execute(
+                        """
+                        INSERT INTO agent_runs (
+                            run_id, user_id, session_id, status, user_input,
+                            final_answer, error_type, error_message,
+                            total_llm_calls, total_tool_calls,
+                            started_at, finished_at
+                        ) VALUES (?, ?, ?, 'running', ?, NULL, NULL, NULL,
+                                  0, 0, ?, NULL)
+                        """,
+                        (run_id, user_id, session_id, user_input, timestamp),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO trace_events (
+                            run_id, sequence, event_type, step_number,
+                            payload_json, created_at
+                        ) VALUES (?, 1, 'run_started', NULL, ?, ?)
+                        """,
+                        (run_id, payload_json, timestamp),
+                    )
+            except sqlite3.IntegrityError as error:
+                raise MemoryStoreError("Failed to create the Trace run.") from error
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to create the Trace run.") from error
+        result = self.get_trace_run(run_id)
+        if result is None:
+            raise MemoryStoreError("Created Trace run could not be read.")
+        return result
+
+    def append_trace_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Dict[str, Any],
+        step_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Append the next event sequence to one running Trace."""
+        run_id = self._validate_text(run_id, "run_id")
+        event_type = self._validate_text(event_type, "event_type")
+        if step_number is not None:
+            self._validate_positive_integer(step_number, "step_number")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object.")
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("payload must be JSON serializable.") from error
+        timestamp = self._now()
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    run = connection.execute(
+                        "SELECT status FROM agent_runs WHERE run_id = ?",
+                        (run_id,),
+                    ).fetchone()
+                    if run is None:
+                        raise MemoryStoreError("Trace run was not found.")
+                    if run["status"] != "running":
+                        raise MemoryStoreError("Trace run is no longer running.")
+                    row = connection.execute(
+                        """
+                        SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
+                        FROM trace_events WHERE run_id = ?
+                        """,
+                        (run_id,),
+                    ).fetchone()
+                    sequence = int(row["next_sequence"])
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO trace_events (
+                            run_id, sequence, event_type, step_number,
+                            payload_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            sequence,
+                            event_type,
+                            step_number,
+                            payload_json,
+                            timestamp,
+                        ),
+                    )
+                    event_id = int(cursor.lastrowid)
+            except MemoryStoreError:
+                raise
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to append the Trace event.") from error
+        return {
+            "id": event_id,
+            "run_id": run_id,
+            "sequence": sequence,
+            "event_type": event_type,
+            "step_number": step_number,
+            "payload": json.loads(payload_json),
+            "created_at": timestamp,
+        }
+
+    def update_trace_run_completed(
+        self,
+        run_id: str,
+        final_answer: str,
+        total_llm_calls: int,
+        total_tool_calls: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Mark one running Trace completed and return it."""
+        run_id = self._validate_text(run_id, "run_id")
+        final_answer = self._validate_text(final_answer, "final_answer")
+        self._validate_non_negative_integer(total_llm_calls, "total_llm_calls")
+        self._validate_non_negative_integer(total_tool_calls, "total_tool_calls")
+        timestamp = self._now()
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    cursor = connection.execute(
+                        """
+                        UPDATE agent_runs
+                        SET status = 'completed', final_answer = ?,
+                            error_type = NULL, error_message = NULL,
+                            total_llm_calls = ?, total_tool_calls = ?,
+                            finished_at = ?
+                        WHERE run_id = ? AND status = 'running'
+                        """,
+                        (
+                            final_answer,
+                            total_llm_calls,
+                            total_tool_calls,
+                            timestamp,
+                            run_id,
+                        ),
+                    )
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to complete the Trace run.") from error
+        if cursor.rowcount == 0:
+            return None
+        return self.get_trace_run(run_id)
+
+    def update_trace_run_failed(
+        self,
+        run_id: str,
+        error_type: str,
+        error_message: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Mark one running Trace failed and return it."""
+        run_id = self._validate_text(run_id, "run_id")
+        error_type = self._validate_text(error_type, "error_type")
+        error_message = self._validate_text(error_message, "error_message")
+        timestamp = self._now()
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    cursor = connection.execute(
+                        """
+                        UPDATE agent_runs
+                        SET status = 'failed', final_answer = NULL,
+                            error_type = ?, error_message = ?, finished_at = ?
+                        WHERE run_id = ? AND status = 'running'
+                        """,
+                        (error_type, error_message, timestamp, run_id),
+                    )
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to fail the Trace run.") from error
+        if cursor.rowcount == 0:
+            return None
+        return self.get_trace_run(run_id)
+
+    def get_trace_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Return one Trace run by id."""
+        run_id = self._validate_text(run_id, "run_id")
+        try:
+            with self._connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT run_id, user_id, session_id, status, user_input,
+                           final_answer, error_type, error_message,
+                           total_llm_calls, total_tool_calls,
+                           started_at, finished_at
+                    FROM agent_runs WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+        except sqlite3.Error as error:
+            raise MemoryStoreError("Failed to read the Trace run.") from error
+        return self._trace_run_from_row(row) if row is not None else None
+
+    def list_trace_runs(
+        self,
+        user_id: str,
+        session_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List one user's Trace runs newest first with optional filters."""
+        user_id = self._validate_text(user_id, "user_id")
+        if session_id is not None:
+            session_id = self._validate_text(session_id, "session_id")
+        if status is not None:
+            self._validate_trace_status(status)
+        self._validate_trace_limit(limit)
+        clauses = ["user_id = ?"]
+        parameters: List[Any] = [user_id]
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            parameters.append(session_id)
+        if status is not None:
+            clauses.append("status = ?")
+            parameters.append(status)
+        parameters.append(limit)
+        query = """
+            SELECT run_id, user_id, session_id, status, user_input,
+                   final_answer, error_type, error_message,
+                   total_llm_calls, total_tool_calls,
+                   started_at, finished_at
+            FROM agent_runs
+            WHERE {}
+            ORDER BY started_at DESC, run_id DESC
+            LIMIT ?
+        """.format(" AND ".join(clauses))
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(query, parameters).fetchall()
+        except sqlite3.Error as error:
+            raise MemoryStoreError("Failed to list Trace runs.") from error
+        return [self._trace_run_from_row(row) for row in rows]
+
+    def list_trace_events(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return a Trace's events in sequence order."""
+        run_id = self._validate_text(run_id, "run_id")
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id, run_id, sequence, event_type, step_number,
+                           payload_json, created_at
+                    FROM trace_events
+                    WHERE run_id = ?
+                    ORDER BY sequence ASC
+                    """,
+                    (run_id,),
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise MemoryStoreError("Failed to list Trace events.") from error
+        return [self._trace_event_from_row(row) for row in rows]
+
+    def delete_trace_run(self, user_id: str, run_id: str) -> bool:
+        """Delete one Trace only when it belongs to the supplied user."""
+        user_id = self._validate_text(user_id, "user_id")
+        run_id = self._validate_text(run_id, "run_id")
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    cursor = connection.execute(
+                        "DELETE FROM agent_runs WHERE user_id = ? AND run_id = ?",
+                        (user_id, run_id),
+                    )
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to delete the Trace run.") from error
+        return cursor.rowcount > 0
+
     def add_todo(self, user_id: str, session_id: str, content: str) -> TodoRecord:
         user_id, session_id = self._validate_scope(user_id, session_id)
         content = self._validate_text(content, "content")
@@ -719,6 +1036,28 @@ class SQLiteStore:
             raise ValueError("{} must be an integer greater than 0.".format(field_name))
 
     @staticmethod
+    def _validate_non_negative_integer(value: Any, field_name: str) -> None:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                "{} must be an integer greater than or equal to 0.".format(field_name)
+            )
+
+    @staticmethod
+    def _validate_trace_status(status: str) -> None:
+        if status not in {"running", "completed", "failed"}:
+            raise ValueError("status must be 'running', 'completed', or 'failed'.")
+
+    @staticmethod
+    def _validate_trace_limit(limit: Any) -> None:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or limit < 1
+            or limit > 200
+        ):
+            raise ValueError("limit must be an integer from 1 to 200.")
+
+    @staticmethod
     def _serialize_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         if metadata is None:
             return None
@@ -757,6 +1096,45 @@ class SQLiteStore:
             created_at=row["created_at"],
             metadata=metadata,
         )
+
+    @staticmethod
+    def _trace_run_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "run_id": row["run_id"],
+            "user_id": row["user_id"],
+            "session_id": row["session_id"],
+            "status": row["status"],
+            "user_input": row["user_input"],
+            "final_answer": row["final_answer"],
+            "error_type": row["error_type"],
+            "error_message": row["error_message"],
+            "total_llm_calls": int(row["total_llm_calls"]),
+            "total_tool_calls": int(row["total_tool_calls"]),
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+        }
+
+    @staticmethod
+    def _trace_event_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError as error:
+            raise MemoryStoreError("Stored Trace payload is invalid JSON.") from error
+        if not isinstance(payload, dict):
+            raise MemoryStoreError("Stored Trace payload is not an object.")
+        return {
+            "id": int(row["id"]),
+            "run_id": row["run_id"],
+            "sequence": int(row["sequence"]),
+            "event_type": row["event_type"],
+            "step_number": (
+                int(row["step_number"])
+                if row["step_number"] is not None
+                else None
+            ),
+            "payload": payload,
+            "created_at": row["created_at"],
+        }
 
     @staticmethod
     def _todo_from_row(row: sqlite3.Row) -> TodoRecord:

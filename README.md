@@ -6,8 +6,8 @@ Build a minimal, self-managed Agent runtime step by step without using an Agent
 framework. The project currently includes tools, an OpenAI-compatible HTTP
 client, a structured Agent output parser, a core Agent Runtime loop, SQLite
 storage for Sessions/messages/Todos, persisted Session conversations, and
-manual real-service demos. Its Session service now automatically runs recalled
-history through the independently testable basic Context manager.
+manual real-service demos. Its Session service automatically builds bounded
+Context and persists a sanitized execution Trace for every Agent run.
 
 ## Technology stack
 
@@ -248,6 +248,48 @@ python -m pytest -q tests/test_session_context_integration.py
 python -m pytest -q
 ```
 
+## Persistent Agent Trace
+
+`SessionAgentService` enables `SQLiteTraceRecorder` by default. Each validated
+chat starts one `run_id`, records Context statistics and Runtime decisions,
+then ends as `completed` or `failed`. Successful conversation messages are
+still saved separately, and Trace data is never recalled into the next LLM
+Context.
+
+The `agent_runs` table stores one lifecycle row per invocation: Session scope,
+status, bounded user input/final answer, concise failure information, call
+counts, and timestamps. The `trace_events` table stores ordered events using a
+per-run `sequence`:
+
+```text
+run_started
+→ context_built
+→ llm_decision
+→ tool_call → tool_result      (repeated in execution order)
+→ llm_decision                 (for later Runtime steps)
+→ run_completed | run_failed
+```
+
+Trace payloads retain Context counts, short `reasoning_summary` values, model
+name, tool names/arguments, and real sanitized tool results. They do not retain
+the Runtime's complete messages, system Prompt, full hidden reasoning, API
+keys, authorization values, passwords/tokens, or raw HTTP responses. Sensitive
+keys are recursively replaced with `[REDACTED]`, and long strings are bounded.
+
+Runs are isolated by `user_id` and optional `session_id` filters. Deleting a
+Session cascades to its runs and events. `SessionChatResult.run_id` is the
+stable lookup key intended for a later HTTP API and Trace panel; the result does
+not inline every event.
+
+After configuring `.env`, run the real calculator + Todo Trace demonstration:
+
+```bash
+python -m scripts.trace_demo
+```
+
+The script uses only `data/trace-demo.db`, prints the completed run and ordered
+events, and verifies that real calculator and Todo results were recorded.
+
 ## Current architecture
 
 ```text
@@ -272,5 +314,5 @@ AgentDecision(final/tool_call)
      Return result to LLM and continue
 ```
 
-HTTP Chat/Session routes, the multi-window web UI, long-term user memory, and
-independent persistent traces remain future milestones.
+HTTP Chat/Trace routes, the multi-window web UI, and long-term user memory
+remain future milestones.

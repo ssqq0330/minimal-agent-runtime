@@ -13,6 +13,7 @@ from app.memory.store import (
     SessionRecord,
     SQLiteStore,
 )
+from app.observability.trace import SQLiteTraceRecorder, TraceError
 from app.tools.base import ToolContext
 
 
@@ -26,6 +27,7 @@ class SessionChatResult:
     agent_result: AgentRunResult
     loaded_history_count: int
     context_result: Optional[ContextBuildResult] = None
+    run_id: Optional[str] = None
 
     @property
     def context_compressed(self) -> bool:
@@ -48,6 +50,7 @@ class SessionChatResult:
             "agent_result": self.agent_result.to_dict(),
             "loaded_history_count": self.loaded_history_count,
             "context": self._context_stats(),
+            "run_id": self.run_id,
         }
 
     def _context_stats(self) -> Dict[str, Any]:
@@ -73,6 +76,7 @@ class SessionAgentService:
         store: SQLiteStore,
         history_limit: Optional[int] = None,
         context_manager: Optional[BasicContextManager] = None,
+        trace_recorder: Optional[SQLiteTraceRecorder] = None,
     ) -> None:
         if not isinstance(runtime, AgentRuntime):
             raise ValueError("runtime must be an AgentRuntime.")
@@ -83,6 +87,11 @@ class SessionAgentService:
             BasicContextManager,
         ):
             raise TypeError("context_manager must be a BasicContextManager or None.")
+        if trace_recorder is not None and not isinstance(
+            trace_recorder,
+            SQLiteTraceRecorder,
+        ):
+            raise TypeError("trace_recorder must be a SQLiteTraceRecorder or None.")
         self._validate_limit(history_limit, "history_limit")
         self.runtime = runtime
         self.store = store
@@ -91,6 +100,11 @@ class SessionAgentService:
             context_manager
             if context_manager is not None
             else BasicContextManager()
+        )
+        self.trace_recorder = (
+            trace_recorder
+            if trace_recorder is not None
+            else SQLiteTraceRecorder(store)
         )
 
     def chat(
@@ -104,44 +118,55 @@ class SessionAgentService:
         session_id = self._validate_text(session_id, "session_id")
         user_input = self._validate_text(user_input, "user_input")
         self._require_session(user_id, session_id)
+        trace_run = self.trace_recorder.start_run(user_id, session_id, user_input)
 
-        raw_history = self.store.list_messages(
-            user_id,
-            session_id,
-            limit=self.history_limit,
-        )
-        context_result = self.context_manager.build(raw_history)
-        context = ToolContext(user_id=user_id, session_id=session_id)
-        agent_result = self.runtime.run(
-            user_input=user_input,
-            context=context,
-            history=context_result.messages,
-        )
-
-        user_message, assistant_message = self.store.add_exchange(
-            user_id=user_id,
-            session_id=session_id,
-            user_content=user_input,
-            assistant_content=agent_result.answer,
-            assistant_metadata=self._build_agent_metadata(
-                agent_result,
-                context_result,
-            ),
-        )
-        updated_session = self.store.get_session(user_id, session_id)
-        if updated_session is None:
-            raise SessionNotFoundError(
-                "Session '{}' no longer exists for this user.".format(session_id)
+        try:
+            raw_history = self.store.list_messages(
+                user_id,
+                session_id,
+                limit=self.history_limit,
+            )
+            context_result = self.context_manager.build(raw_history)
+            self.trace_recorder.record_context(trace_run.run_id, context_result)
+            context = ToolContext(user_id=user_id, session_id=session_id)
+            agent_result = self.runtime.run(
+                user_input=user_input,
+                context=context,
+                history=context_result.messages,
             )
 
-        return SessionChatResult(
-            session=updated_session,
-            user_message=user_message,
-            assistant_message=assistant_message,
-            agent_result=agent_result,
-            loaded_history_count=len(raw_history),
-            context_result=context_result,
-        )
+            user_message, assistant_message = self.store.add_exchange(
+                user_id=user_id,
+                session_id=session_id,
+                user_content=user_input,
+                assistant_content=agent_result.answer,
+                assistant_metadata=self._build_agent_metadata(
+                    agent_result,
+                    context_result,
+                ),
+            )
+            self.trace_recorder.record_agent_result(trace_run.run_id, agent_result)
+            updated_session = self.store.get_session(user_id, session_id)
+            if updated_session is None:
+                raise SessionNotFoundError(
+                    "Session '{}' no longer exists for this user.".format(session_id)
+                )
+
+            return SessionChatResult(
+                session=updated_session,
+                user_message=user_message,
+                assistant_message=assistant_message,
+                agent_result=agent_result,
+                loaded_history_count=len(raw_history),
+                context_result=context_result,
+                run_id=trace_run.run_id,
+            )
+        except Exception as error:
+            try:
+                self.trace_recorder.fail_run(trace_run.run_id, error)
+            except TraceError as trace_error:
+                raise trace_error from error
+            raise
 
     def get_history(
         self,

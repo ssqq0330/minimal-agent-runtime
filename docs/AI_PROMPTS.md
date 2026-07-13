@@ -4614,3 +4614,647 @@ python -m pytest -q
 7. 不执行 git commit。
 8. 不执行 git push。
 ```
+
+## 2026-07-13: Stage 07 — Persistent Agent Trace
+
+Full prompt:
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、JSON 输出解析器和 Prompt
+stage-04：自行实现 Agent Runtime Loop
+stage-05：SQLite Session、消息、Todo 持久化和多窗口续聊
+stage-06：Context 管理、基础压缩并接入 SessionAgentService
+
+当前完整测试为 395 passed。
+
+现在开始第七阶段：实现 Agent 工具调用 Trace 与执行日志持久化。
+
+本阶段先完成 SQLite Trace、SessionAgentService 自动记录以及命令行演示。
+
+暂时不要实现：
+
+- FastAPI Trace 路由
+- 网页 Trace 面板
+- 网页聊天界面
+- 精确 Token 统计
+- git commit
+- git push
+
+项目使用 Python 3.11，并保持 Python 3.10 兼容。
+
+禁止使用 LangChain、LangGraph、OpenAI Agents SDK、OpenHands、OpenClaw 或其他 Agent 框架。
+
+一、目标
+
+每次 SessionAgentService.chat 运行时，持久化记录：
+
+1. 一次 Agent Run。
+2. Context 构建统计。
+3. 每次 LLM 决策。
+4. 每个工具调用。
+5. 每个真实工具结果。
+6. 最终成功结果。
+7. 运行失败时的异常类型和简短错误。
+
+Trace 用于调试和后续网页展示，不进入下一轮 LLM Context。
+
+二、数据库表
+
+修改 app/memory/store.py，在 initialize() 中增加以下表。
+
+1. agent_runs
+
+字段：
+
+- run_id TEXT PRIMARY KEY
+- user_id TEXT NOT NULL
+- session_id TEXT NOT NULL
+- status TEXT NOT NULL
+- user_input TEXT NOT NULL
+- final_answer TEXT
+- error_type TEXT
+- error_message TEXT
+- total_llm_calls INTEGER NOT NULL DEFAULT 0
+- total_tool_calls INTEGER NOT NULL DEFAULT 0
+- started_at TEXT NOT NULL
+- finished_at TEXT
+
+外键：
+
+FOREIGN KEY (user_id, session_id)
+REFERENCES sessions(user_id, session_id)
+ON DELETE CASCADE
+
+status 只允许：
+
+- running
+- completed
+- failed
+
+增加索引：
+
+- user_id + session_id + started_at
+- status + started_at
+
+2. trace_events
+
+字段：
+
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- run_id TEXT NOT NULL
+- sequence INTEGER NOT NULL
+- event_type TEXT NOT NULL
+- step_number INTEGER
+- payload_json TEXT NOT NULL
+- created_at TEXT NOT NULL
+
+约束：
+
+UNIQUE (run_id, sequence)
+
+外键：
+
+FOREIGN KEY (run_id)
+REFERENCES agent_runs(run_id)
+ON DELETE CASCADE
+
+增加 run_id + sequence 索引。
+
+三、Trace 数据结构
+
+在 app/observability/trace.py 中实现：
+
+1. TraceRunRecord
+
+字段：
+
+- run_id: str
+- user_id: str
+- session_id: str
+- status: str
+- user_input: str
+- final_answer: str | None
+- error_type: str | None
+- error_message: str | None
+- total_llm_calls: int
+- total_tool_calls: int
+- started_at: str
+- finished_at: str | None
+
+提供 to_dict()。
+
+2. TraceEventRecord
+
+字段：
+
+- id: int
+- run_id: str
+- sequence: int
+- event_type: str
+- step_number: int | None
+- payload: dict[str, Any]
+- created_at: str
+
+提供 to_dict()。
+
+3. AgentTraceResult
+
+字段：
+
+- run: TraceRunRecord
+- events: list[TraceEventRecord]
+
+提供 to_dict()。
+
+四、异常
+
+实现：
+
+- TraceError
+- TraceValidationError
+- TraceNotFoundError
+- TracePersistenceError
+
+错误信息不得包含：
+
+- API Key
+- Authorization
+- 完整 system Prompt
+- 原始 HTTP 响应
+- 完整隐藏思维链
+
+五、敏感信息过滤
+
+在 app/observability/trace.py 中实现：
+
+sanitize_trace_payload(
+    value: Any,
+    max_string_chars: int = 4000
+) -> Any
+
+要求递归处理：
+
+- dict
+- list
+- tuple
+- string
+- number
+- bool
+- None
+
+以下 key 大小写不敏感时必须替换成：
+
+"[REDACTED]"
+
+敏感 key 至少包括：
+
+- api_key
+- authorization
+- token
+- access_token
+- refresh_token
+- password
+- secret
+- llm_api_key
+
+字符串超过 max_string_chars 时截断并添加：
+
+……[trace 已截断]
+
+不能修改调用者传入的原始对象。
+
+六、SQLite Trace Recorder
+
+在 app/observability/trace.py 中实现：
+
+SQLiteTraceRecorder(
+    store: SQLiteStore
+)
+
+要求：
+
+1. store 必须为 SQLiteStore。
+2. 初始化不创建 Agent Run。
+3. 不调用 LLM。
+4. 使用 SQLiteStore 提供的公开 Trace 方法。
+5. 不直接访问 SQLiteStore 的私有 connection 方法。
+
+实现：
+
+start_run(
+    user_id: str,
+    session_id: str,
+    user_input: str
+) -> TraceRunRecord
+
+规则：
+
+- 使用 uuid.uuid4().hex 生成 run_id
+- Session 必须存在
+- status=running
+- 自动写入 run_started 事件
+- user_input 可以存储，但必须限制最大长度，例如 8000 字符
+
+实现：
+
+record_context(
+    run_id: str,
+    context_result: ContextBuildResult
+) -> TraceEventRecord
+
+event_type：
+
+context_built
+
+payload 只保存统计：
+
+- compressed
+- original_message_count
+- output_message_count
+- summarized_message_count
+- retained_recent_count
+- original_char_count
+- output_char_count
+
+不能保存：
+
+- summary_text
+- 完整 messages
+
+实现：
+
+record_agent_result(
+    run_id: str,
+    agent_result: AgentRunResult
+) -> TraceRunRecord
+
+按运行顺序写入事件：
+
+对于每个 AgentStep：
+
+1. llm_decision
+
+payload：
+
+- decision_type
+- reasoning_summary
+- model
+
+2. 对每个工具调用写入 tool_call：
+
+- tool_call_id
+- tool_name
+- arguments
+
+3. 对对应工具结果写入 tool_result：
+
+- tool_call_id
+- tool_name
+- success
+- output
+- error
+
+必须保持 tool_call 和 tool_result 的顺序。
+
+最后写入：
+
+run_completed
+
+payload：
+
+- stopped_reason
+- total_llm_calls
+- total_tool_calls
+
+并更新 agent_runs：
+
+- status=completed
+- final_answer
+- total_llm_calls
+- total_tool_calls
+- finished_at
+
+不能保存 AgentRunResult.messages。
+
+实现：
+
+fail_run(
+    run_id: str,
+    error: Exception
+) -> TraceRunRecord
+
+要求：
+
+1. 写入 run_failed 事件。
+2. status 更新为 failed。
+3. 保存 error_type。
+4. 保存简短 error_message。
+5. 错误信息经过敏感信息过滤和长度限制。
+6. finished_at 被设置。
+7. 不保存 traceback 全文。
+8. 不保存 API Key。
+9. 重复 fail 已完成的 Run 时返回明确错误。
+
+实现：
+
+get_trace(
+    run_id: str
+) -> AgentTraceResult
+
+事件按 sequence 升序。
+
+实现：
+
+list_runs(
+    user_id: str,
+    session_id: str | None = None,
+    status: str | None = None,
+    limit: int = 50
+) -> list[TraceRunRecord]
+
+要求：
+
+- 必须按 user_id 隔离
+- session_id 可选
+- status 可选
+- limit 为 1～200
+- 按 started_at 降序
+- 不允许用户 A 查看用户 B 的 Run
+
+实现：
+
+delete_trace(
+    user_id: str,
+    run_id: str
+) -> bool
+
+只能删除属于当前 user_id 的 Trace。
+
+七、SQLiteStore Trace 方法
+
+在 app/memory/store.py 中增加对应的底层方法，例如：
+
+- create_trace_run(...)
+- append_trace_event(...)
+- update_trace_run_completed(...)
+- update_trace_run_failed(...)
+- get_trace_run(...)
+- list_trace_runs(...)
+- list_trace_events(...)
+- delete_trace_run(...)
+
+要求：
+
+1. 所有 SQL 参数绑定。
+2. sequence 在同一 run_id 内从 1 开始递增。
+3. 写入事件时使用事务，避免重复 sequence。
+4. 可使用 BEGIN IMMEDIATE。
+5. JSON 使用 ensure_ascii=False。
+6. payload 必须可 JSON 序列化。
+7. 不暴露原始 SQL。
+8. 删除 Session 时 Trace 也级联删除。
+9. 数据库重新打开后 Trace 仍存在。
+
+八、SessionAgentService 接入
+
+修改 app/agent/session_service.py。
+
+构造方法增加可选参数：
+
+trace_recorder: SQLiteTraceRecorder | None = None
+
+规则：
+
+1. 没传时默认使用 SQLiteTraceRecorder(store)，使 Trace 默认开启。
+2. 传入时必须是 SQLiteTraceRecorder。
+3. 不修改 AgentRuntime 的公开接口。
+4. 不把 Trace 放入 LLM Context。
+
+chat 执行流程：
+
+1. 校验输入和 Session。
+2. start_run。
+3. 加载并构建 Context。
+4. record_context。
+5. 执行 AgentRuntime。
+6. Runtime 成功后先原子保存 user/assistant 消息。
+7. record_agent_result。
+8. 返回 SessionChatResult。
+
+失败行为：
+
+1. Context 构建失败：
+   - fail_run
+   - 不保存对话消息
+   - 继续抛出原异常
+
+2. Runtime 失败：
+   - fail_run
+   - 不保存对话消息
+   - 继续抛出原异常
+
+3. 消息保存失败：
+   - fail_run
+   - 对话事务回滚
+   - 继续抛出异常
+
+4. Trace 本身写入失败时，不允许伪装成成功。
+5. 不用 except Exception 吞掉异常，但可以在最外层记录失败后重新抛出。
+
+九、SessionChatResult
+
+增加：
+
+run_id: str | None = None
+
+要求：
+
+1. 正常 chat 返回 run_id。
+2. to_dict 中包含 run_id。
+3. 不内嵌所有 Trace 事件。
+4. 后续 HTTP API 根据 run_id 查询完整 Trace。
+5. 保持旧接口兼容。
+
+十、模块导出
+
+更新 app/observability/__init__.py，导出：
+
+- TraceRunRecord
+- TraceEventRecord
+- AgentTraceResult
+- TraceError
+- TraceValidationError
+- TraceNotFoundError
+- TracePersistenceError
+- SQLiteTraceRecorder
+- sanitize_trace_payload
+
+十一、测试
+
+新增：
+
+tests/test_trace_store.py
+tests/test_session_trace_integration.py
+
+不能调用真实网络，使用 tmp_path 和 FakeLLMClient。
+
+至少覆盖：
+
+数据库与记录器：
+
+1. 自动创建 agent_runs 和 trace_events 表。
+2. start_run 返回 running。
+3. run_id 唯一。
+4. 自动生成 run_started。
+5. context_built 只保存统计。
+6. context 事件不保存 summary_text。
+7. context 事件不保存完整 messages。
+8. 正常 final 记录 llm_decision。
+9. calculator 记录 tool_call。
+10. calculator 记录 tool_result。
+11. tool_result 包含真实结果 60。
+12. 多工具保持原顺序。
+13. 多 Step 保持顺序。
+14. run_completed 正常。
+15. completed run 保存 final_answer。
+16. completed run 保存调用次数。
+17. fail_run 保存错误类型。
+18. fail_run 保存简短错误。
+19. failed run 有 run_failed 事件。
+20. 事件 sequence 从 1 递增。
+21. get_trace 按 sequence 排序。
+22. list_runs 按最新在前。
+23. status 筛选正常。
+24. session_id 筛选正常。
+25. limit 校验。
+26. 数据重开后 Trace 仍存在。
+27. 删除 Session 后 Trace 被级联删除。
+28. delete_trace 正常。
+29. 用户 A 不能删除用户 B 的 Trace。
+30. 用户 A 不能列出用户 B 的 Trace。
+
+敏感信息：
+
+31. api_key 被替换为 REDACTED。
+32. Authorization 被替换。
+33. password 被替换。
+34. 嵌套敏感字段被替换。
+35. list 内敏感字段被替换。
+36. 长字符串被截断。
+37. 原对象不被修改。
+38. Trace 中不包含 system Prompt。
+39. Trace 中不包含 AgentRunResult.messages。
+40. Trace 中不包含完整内部思维链字段。
+
+Session 集成：
+
+41. 正常 chat 返回 run_id。
+42. 正常 chat 创建 completed Run。
+43. Context 统计被记录。
+44. 直接 final 记录一个 llm_decision。
+45. calculator 循环记录真实工具结果。
+46. search + todo 记录两个工具。
+47. todo 使用正确 user_id 和 session_id。
+48. window-1 和 window-2 Trace 隔离。
+49. 不同用户相同 session_id Trace 隔离。
+50. ContextCompressionError 创建 failed Run。
+51. AgentLLMError 创建 failed Run。
+52. AgentDecisionError 创建 failed Run。
+53. AgentMaxStepsError 创建 failed Run。
+54. 运行失败时不保存对话消息。
+55. 成功时仍只保存 user 和 final assistant。
+56. Trace 事件不进入下一轮 Context。
+57. reasoning_summary 只出现在 Trace，不作为历史消息。
+58. SessionChatResult.to_dict 包含 run_id。
+59. 原有 Session、Context、Runtime 测试全部通过。
+
+十二、演示脚本
+
+新增：
+
+scripts/trace_demo.py
+
+运行：
+
+python -m scripts.trace_demo
+
+流程：
+
+1. 清理 data/trace-demo.db 及 WAL 文件。
+2. 创建 demo-user / trace-window。
+3. 使用真实 LLM。
+4. 发起：
+
+请计算 20 * (5 + 1)，并把“检查计算结果”添加到待办中。
+
+5. 打印最终回答和 run_id。
+6. 使用 get_trace(run_id) 查询完整 Trace。
+7. 打印：
+   - Run 状态
+   - 开始结束时间
+   - LLM 调用次数
+   - 工具调用次数
+   - 按 sequence 排序的事件
+8. 应看到 calculator 和 todo 的真实结果。
+9. 不打印 API Key。
+10. 不打印 Authorization。
+11. 正确关闭 LLM Client。
+
+十三、README 和文档
+
+README 增加：
+
+1. Trace 生命周期。
+2. agent_runs 和 trace_events 表说明。
+3. 记录哪些内容。
+4. 不记录哪些敏感内容。
+5. Trace 不进入对话 Context。
+6. 如何运行：
+
+python -m scripts.trace_demo
+
+docs/AI_PROMPTS.md 追加本次提示词。
+
+docs/PROBLEM_SOLVING.md 记录：
+
+1. 为什么 Trace 与 Context 分离。
+2. 为什么只记录 reasoning_summary。
+3. 为什么使用 run_id。
+4. 为什么事件使用 sequence。
+5. 工具失败如何记录。
+6. Runtime 失败如何记录。
+7. 如何过滤敏感信息。
+8. 为什么不保存完整 HTTP 响应。
+9. 为什么 Trace 随 Session 级联删除。
+10. 后续网页如何根据 run_id 显示执行过程。
+
+十四、限制
+
+1. 不实现 HTTP Trace 路由。
+2. 不修改 AgentRuntime 公开接口。
+3. 不把 Trace 塞入 LLM Context。
+4. 不实现网页。
+5. 不增加第三方依赖。
+6. 不执行 git commit。
+7. 不执行 git push。
+
+十五、完成后
+
+1. 运行：
+
+python -m pytest tests/test_trace_store.py tests/test_session_trace_integration.py -q
+
+2. 运行：
+
+python -m pytest -q
+
+3. 修复全部失败。
+4. 运行真实 Trace Demo。
+5. 列出创建和修改文件。
+6. 说明一次 Trace 的事件顺序。
+7. 不执行 git commit 或 git push。
+```

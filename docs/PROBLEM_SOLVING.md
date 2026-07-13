@@ -303,3 +303,41 @@
   and prefix truncation does not understand semantic priority. This stage gains
   deterministic bounds without a tokenizer or summarization LLM, leaving those
   possible refinements for later work.
+
+## 2026-07-13: Stage 07 — Agent Trace 持久化
+
+- Why Trace and Context are separate: Context is model input optimized for
+  conversational continuity, while Trace is operational evidence optimized for
+  debugging. Keeping separate tables and code paths prevents stale tool events
+  or diagnostic fields from influencing later model decisions.
+- Why only `reasoning_summary` is recorded: The Runtime protocol already asks
+  for a concise, user-safe decision summary. Persisting that value explains the
+  step without requesting or storing complete hidden chain-of-thought content.
+- Why every invocation has a `run_id`: Session ids identify conversation
+  windows, not individual executions. A random run id correlates one Context
+  build, all LLM/tool events, completion or failure, and a future UI request.
+- Why events use `sequence`: Timestamps can tie and are not a reliable ordering
+  mechanism. A transactionally allocated per-run integer preserves exact
+  decision/call/result order across multiple tools and Runtime steps.
+- Tool failures: A tool failure is still a real Runtime result, so Trace records
+  its call followed by a `tool_result` with `success=false`, sanitized output,
+  and concise error. The next LLM step can then be understood without changing
+  Runtime recovery behavior.
+- Runtime failures: The service starts Trace before Context construction and
+  catches the outer operation only to call `fail_run` and re-raise. Failed
+  Context, LLM, parsing, step-limit, or message persistence operations therefore
+  create a terminal failed run without becoming successful chat responses.
+- Sensitive-data filtering: Trace payloads are recursively copied before write.
+  Secret-bearing keys are replaced case-insensitively, named credentials inside
+  strings are redacted, and oversized strings are truncated with an explicit
+  marker; caller-owned objects remain unchanged.
+- Why raw HTTP responses are excluded: They may contain provider diagnostics,
+  echoed request material, or other sensitive/large values and are unnecessary
+  to reconstruct the Agent's application-level decision and real tool outcome.
+- Why Trace cascades with Session deletion: A run has meaning only inside its
+  user/Session scope and can contain conversation-derived data. Foreign-key
+  cascade makes the Session deletion boundary complete and prevents orphaned
+  diagnostic records.
+- Future web presentation: `SessionChatResult` returns only `run_id`. A later
+  authenticated Trace route can enforce user ownership, call `get_trace`, and
+  render the sequence as a timeline without bloating every chat response.
