@@ -746,6 +746,11 @@ code {
   font-size: 0.72rem;
 }
 
+#character-count.is-over-limit {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .composer-actions {
   gap: var(--space-3);
 }

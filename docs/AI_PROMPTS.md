@@ -1256,6 +1256,7 @@ python -m pytest tests/test_agent_parser.py tests/test_prompts.py -q
 不执行 git push。
 ````
 
+
 ## 2026-07-13: Real LLM smoke test
 
 Location: the user request in the current Codex task conversation.
@@ -6589,6 +6590,680 @@ python -m pytest -q
 7. 说明前端状态流转。
 8. 不执行 git commit。
 9. 不执行 git push。
+````
+
+## 2026-07-13: Stage 10 — 端到端测试、异常加固、并发保护和最终体验优化
+
+````text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制与 calculator、search、todo
+stage-03：真实 LLM Client、结构化 JSON 协议和解析器
+stage-04：自行实现 Agent Runtime Loop
+stage-05：SQLite Session、消息、Todo 持久化与多窗口续聊
+stage-06：Context 管理和基础压缩
+stage-07：Agent Trace 与执行日志持久化
+stage-08：FastAPI Session、Chat、Todo、Trace API
+stage-09：多 Session Web UI、Todo 面板、Trace 时间线和安全渲染
+
+现在开始第十阶段：端到端测试、异常加固、并发保护和最终体验优化。
+
+本阶段不新增大型功能，不重构已经稳定的 Agent Runtime 协议，重点是验证和加固现有系统。
+
+禁止使用：
+
+- LangChain
+- LangGraph
+- OpenAI Agents SDK
+- OpenHands
+- OpenClaw
+- 其他 Agent 框架
+- React、Vue 等前端框架
+- npm 构建流程
+- 外部 CDN
+
+项目使用 Python 3.11，并保持 Python 3.10 兼容。
+
+一、阶段目标
+
+完成以下工作：
+
+1. 建立完整端到端测试。
+2. 加固同一 Session 的并发聊天行为。
+3. 检查数据库事务与消息原子性。
+4. 检查所有主要异常路径。
+5. 加固输入长度和参数边界。
+6. 确保错误响应不泄露敏感信息。
+7. 加固前端重复发送和旧请求覆盖问题。
+8. 建立最终验收脚本。
+9. 建立仓库安全检查脚本。
+10. 明确当前项目已知限制。
+
+二、同一 Session 并发保护
+
+当前同一个 user_id + session_id 可能同时收到两个 Chat 请求。
+
+如果两个请求同时加载旧历史，可能导致：
+
+- 对话顺序错乱
+- 两个请求都基于同一份旧 Context
+- Todo 或消息顺序不可预期
+- Trace 与消息对应关系混乱
+
+请实现轻量的 Session 级锁。
+
+建议新增：
+
+app/agent/session_locks.py
+
+实现：
+
+SessionLockManager
+
+功能：
+
+acquire(user_id: str, session_id: str)
+
+可以返回上下文管理器：
+
+with lock_manager.acquire(user_id, session_id):
+    ...
+
+要求：
+
+1. 锁的作用域必须是 user_id + session_id。
+2. 同一用户同一 Session 的 chat 串行执行。
+3. 同一用户不同 Session 可以并行。
+4. 不同用户相同 session_id 可以并行。
+5. 使用 threading.RLock 或 threading.Lock。
+6. 锁管理器自身线程安全。
+7. 不把锁对象写入数据库。
+8. 不修改 AgentRuntime。
+9. 锁只包围一次 SessionAgentService.chat 的核心流程。
+10. Runtime 异常后必须释放锁。
+11. 数据库异常后必须释放锁。
+12. 不允许发生永久死锁。
+13. 可以实现简单的锁字典清理策略，避免无限增长。
+14. 不要求跨进程分布式锁，README 中说明当前只保证单进程内并发安全。
+
+修改 SessionAgentService：
+
+构造方法增加可选参数：
+
+lock_manager: SessionLockManager | None = None
+
+未提供时创建默认 SessionLockManager。
+
+chat 中在完成基础字符串校验后，使用：
+
+with lock_manager.acquire(user_id, session_id):
+    检查 Session
+    加载历史
+    构建 Context
+    调用 Runtime
+    保存消息
+    完成 Trace
+
+三、服务端输入限制
+
+统一确认并加固以下限制：
+
+1. user_id 最大 128 字符。
+2. session_id 最大 128 字符。
+3. Session title 最大 200 字符。
+4. Chat message 最大 8000 字符。
+5. Todo content 最大 1000 字符。
+6. Search query 最大 1000 字符。
+7. Calculator expression 最大 200 字符。
+8. Trace limit 范围 1～200。
+9. Message history limit 范围 1～500。
+10. 空白字符串全部视为无效。
+11. bool 不作为合法整数。
+12. 超限时返回清晰的 422 或工具失败结果。
+13. 前后端限制保持一致。
+14. 不截断用户 Chat 输入后偷偷继续处理，应明确报错。
+15. Trace 内部可以安全截断日志字段，但不能改变真实工具执行参数。
+
+优先在：
+
+- Pydantic Schema
+- SQLiteStore 校验
+- Tool 参数校验
+- SessionAgentService
+
+对应边界处理，不重复堆叠无意义校验。
+
+四、错误响应安全
+
+检查所有 API 错误响应，确保不包含：
+
+- LLM_API_KEY
+- Authorization
+- Bearer Token
+- password
+- secret
+- .env 内容
+- 完整 traceback
+- 完整 system Prompt
+- 原始 HTTP 响应全文
+
+新增统一函数，例如：
+
+sanitize_error_message(
+    message: str,
+    max_chars: int = 1000
+) -> str
+
+要求：
+
+1. 对常见敏感字段进行替换。
+2. 超长错误进行截断。
+3. 不修改原始 Exception。
+4. API 错误、Trace failed 事件都使用一致过滤规则。
+5. 不把未知异常直接 str(exception) 原样暴露给客户端。
+6. 服务端可以保留简短日志，但不得打印密钥。
+
+五、主要异常路径加固
+
+确认并测试：
+
+1. 缺少 .env 时应用仍能启动。
+2. 健康检查仍返回 200。
+3. Chat 返回 503。
+4. LLM HTTP 401 返回 502，且不暴露响应全文。
+5. LLM HTTP 429 返回 502，并给出可理解错误。
+6. LLM HTTP 500 返回 502。
+7. LLM 请求超时返回 502。
+8. LLM 网络连接失败返回 502。
+9. LLM 返回空 content 返回 502。
+10. LLM 返回非 JSON 决策返回 502。
+11. LLM 返回不支持的 type 返回 502。
+12. LLM 选择未知工具时 Runtime 不崩溃。
+13. 工具参数错误时结果交回 LLM。
+14. calculator 除零时 Runtime 可以继续。
+15. 工具内部抛异常时 Registry 转换成失败结果。
+16. 达到 max_steps 时终止，不无限循环。
+17. Context 压缩失败时不保存本轮消息。
+18. 消息保存失败时不留下半条 Exchange。
+19. Trace 失败记录不泄露敏感信息。
+20. Session 删除后对应消息、Todo、Trace 全部级联删除。
+21. 用户 A 不能访问用户 B 同名 Session。
+22. 用户 A 不能访问或删除用户 B Trace。
+
+六、数据库一致性检查
+
+重点审查：
+
+1. add_exchange 保证 user + assistant 原子写入。
+2. Todo ID 并发生成不重复。
+3. Trace event sequence 不重复。
+4. Session 删除级联正确。
+5. WAL 文件不会进入 Git。
+6. 每次连接启用 foreign_keys。
+7. SQL 全部使用参数绑定。
+8. 用户输入包含单引号、双引号、分号时不会破坏 SQL。
+9. 类似以下文本可正常保存：
+
+Robert'); DROP TABLE sessions;--
+
+10. 保存后 sessions 表仍存在。
+11. 数据库重新打开后数据完整。
+12. 多线程写入不同 Session 时不会互相污染。
+13. SQLite 锁错误转换为清晰的 MemoryStoreError。
+14. 不向用户暴露 SQL 语句。
+
+七、前端异常和竞态加固
+
+检查并修复：
+
+1. 连续点击发送不能重复提交。
+2. Enter 连续触发不能重复请求。
+3. 发送期间切换 Session，旧响应不能进入新 Session。
+4. 发送期间切换 user_id，旧响应不能进入新用户界面。
+5. Todo 请求的旧响应不能覆盖新 Session。
+6. Trace 列表旧响应不能覆盖新 Session。
+7. Trace 详情旧响应不能覆盖新 Run。
+8. 删除 Session 后正在返回的旧 Chat 响应不能重新渲染。
+9. 后端离线时发送按钮禁用。
+10. 网络恢复后健康检查可恢复在线状态。
+11. 503 显示 LLM 未配置提示。
+12. 502 显示模型服务失败提示。
+13. 508 显示超过最大 Agent 步骤提示。
+14. 422 显示输入格式或长度问题。
+15. Chat 成功但 Inspector 刷新失败时，Chat 回答仍保留。
+16. localStorage 损坏值不会导致页面白屏。
+17. localStorage 中不存在的 activeSessionId 会被清除。
+18. JSON API 返回格式异常时显示友好错误。
+19. 所有动态文本继续安全渲染。
+20. `<script>`、`<img onerror>`、SVG 等不能执行。
+
+可以使用 AbortController 取消：
+
+- 消息历史请求
+- Todo 请求
+- Trace 列表请求
+- Trace 详情请求
+
+Chat 请求不一定强制取消，但必须做响应归属检查。
+
+八、前端可用性优化
+
+在不大改视觉设计的情况下优化：
+
+1. Chat 输入达到 8000 字符时明确提示。
+2. 超过限制时禁用发送。
+3. 发送中显示运行状态。
+4. 后端错误后保留输入内容。
+5. 提供“重试”或允许直接再次点击发送。
+6. Session 切换时显示加载状态。
+7. Trace 详情长 JSON 可折叠。
+8. 空状态信息清晰。
+9. Inspector、Session 抽屉支持 Escape 关闭。
+10. 移动端输入区不被面板遮挡。
+11. 删除操作确认文字明确。
+12. 页面刷新后恢复 userId、activeSessionId 和界面开关。
+13. 不恢复或缓存消息正文到 localStorage。
+
+九、端到端测试
+
+新增：
+
+tests/test_end_to_end.py
+
+使用：
+
+- tmp_path SQLite
+- FakeLLMClient
+- 真实 ToolRegistry
+- 真实 AgentRuntime
+- 真实 SessionAgentService
+- 真实 TraceRecorder
+- FastAPI TestClient
+
+至少覆盖：
+
+核心流程：
+
+1. 创建两个 Session。
+2. weather-window 调用 search + todo。
+3. report-window 调用 todo。
+4. 两个窗口消息隔离。
+5. 两个窗口 Todo 隔离。
+6. 两个窗口 Trace 隔离。
+7. weather-window 追问能够召回历史。
+8. report-window 追问能够召回历史。
+9. 程序服务对象重建后历史仍存在。
+10. Context 超限后触发压缩。
+11. 压缩摘要不写入数据库。
+12. Chat 返回 run_id。
+13. 可以通过 run_id 查询完整 Trace。
+14. Trace 顺序正确。
+15. Session 删除后关联数据级联删除。
+
+直接回答：
+
+16. 不需要工具时 LLM 直接 final。
+17. total_tool_calls=0。
+18. Trace 只有决策和完成事件。
+
+工具调用：
+
+19. calculator 返回 60。
+20. search 返回 mock 标记。
+21. todo 添加后可查询。
+22. 一次多工具调用顺序正确。
+23. 多步工具循环正确。
+24. 工具失败结果交回 LLM。
+25. 未知工具不导致服务崩溃。
+
+错误流程：
+
+26. Session 不存在返回 404。
+27. 重复 Session 返回 409。
+28. 空消息返回 422。
+29. 超长消息返回 422。
+30. LLM 请求失败返回 502。
+31. LLM 决策解析失败返回 502。
+32. max_steps 返回约定状态码。
+33. 失败 Chat 不保存消息。
+34. 失败 Chat 创建 failed Trace。
+35. failed Trace 不含敏感信息。
+36. 缺少 LLM 配置返回 503。
+37. 健康检查仍返回 200。
+
+安全隔离：
+
+38. 用户 A 和 B 使用相同 session_id。
+39. A 无法读取 B 消息。
+40. A 无法读取 B Todo。
+41. A 无法读取 B Trace。
+42. A 无法删除 B Session。
+43. A 无法删除 B Trace。
+44. SQL 注入风格文本正常保存。
+45. 数据表未被破坏。
+46. XSS 字符串作为普通消息保存和返回。
+
+十、并发测试
+
+新增：
+
+tests/test_concurrency.py
+
+至少覆盖：
+
+SessionLockManager：
+
+1. 同一 user_id + session_id 使用同一把锁。
+2. 不同 Session 使用不同锁。
+3. 不同用户相同 session_id 使用不同锁。
+4. 异常后锁可以再次获得。
+5. 不发生永久死锁。
+
+Session Chat：
+
+6. 同一 Session 两个并发 Chat 串行完成。
+7. 第二个请求能看到第一个请求保存后的历史。
+8. 最终消息顺序正确。
+9. 每轮恰好保存 user + assistant 两条消息。
+10. 两个 Run 都有独立 run_id。
+11. 不同 Session 可以并发执行。
+12. 不同用户可以并发执行。
+13. Todo ID 在并发场景不重复。
+14. Trace sequence 不重复。
+15. 并发异常不会一直占用 Session 锁。
+
+测试需要设置合理超时，避免测试本身永久等待。
+
+十一、错误和安全测试
+
+新增：
+
+tests/test_error_hardening.py
+
+至少覆盖：
+
+1. sanitize_error_message 隐藏 API Key。
+2. 隐藏 Authorization。
+3. 隐藏 Bearer Token。
+4. 隐藏 password。
+5. 隐藏 secret。
+6. 超长错误被截断。
+7. 不修改原异常。
+8. API 错误不含 traceback。
+9. API 错误不含 system Prompt。
+10. Trace failed 事件不含 API Key。
+11. LLM 401 body 不被完整返回。
+12. LLM 500 HTML body 不被返回。
+13. 非 JSON 后端响应前端有友好处理代码。
+14. repo 中不存在硬编码真实 API Key。
+
+十二、Web 加固测试
+
+新增：
+
+tests/test_web_hardening.py
+
+至少静态检查：
+
+1. 使用 AbortController 或等价请求归属保护。
+2. Chat 响应检查 userId 和 sessionId。
+3. Todo 响应检查 Session。
+4. Trace 响应检查 Session。
+5. Trace Detail 响应检查 run_id。
+6. 发送期间 send-button disabled。
+7. 最大消息长度为 8000。
+8. 超长时禁止发送。
+9. 网络离线时禁用发送。
+10. 不使用 eval。
+11. 不使用 new Function。
+12. 模型输出不使用 innerHTML。
+13. Trace JSON 使用 textContent。
+14. localStorage 不保存消息。
+15. localStorage 不保存 Todo。
+16. localStorage 不保存 Trace。
+17. 页面存在 503、502、508、422 的友好提示逻辑。
+18. 页面存在 Escape 关闭面板逻辑。
+19. 页面存在 prefers-reduced-motion。
+20. 页面不加载外部 CDN。
+
+十三、最终验收脚本
+
+新增：
+
+scripts/final_acceptance.py
+
+运行方式：
+
+python -m scripts.final_acceptance
+
+脚本使用真实 LLM API和独立数据库：
+
+data/final-acceptance.db
+
+启动时只清理该演示数据库及 WAL 文件。
+
+脚本直接通过 ApplicationServices 或本地 API 完成以下流程：
+
+1. 创建用户：
+   acceptance-user
+
+2. 创建两个 Session：
+   weather-window
+   report-window
+
+3. weather-window：
+
+请查询东京天气，并添加待办“出门带伞”。
+
+4. report-window：
+
+请添加待办“周五前完成周报”。
+
+5. weather-window 追问：
+
+刚才查询的是哪个城市？当前待办有哪些？
+
+6. report-window 追问：
+
+当前待办有哪些？
+
+7. calculator：
+
+请计算 12 * (3 + 2)。
+
+8. 验证：
+
+- calculator 结果包含 60
+- weather Todo 包含出门带伞
+- report Todo 包含周五前完成周报
+- Session 消息隔离
+- Todo 隔离
+- Trace 隔离
+- 每个成功 Run 为 completed
+- Trace 事件顺序合法
+- 重启 Store 和 Service 后仍能读取历史
+
+9. 构造足够多历史，验证 Context 压缩：
+   - context compressed=true
+   - 数据库中没有摘要消息
+
+10. 创建另一个用户使用相同 session_id，验证用户隔离。
+
+11. 打印最终验收报告：
+
+=== Final Acceptance Report ===
+LLM API: PASS
+Agent Runtime Loop: PASS
+Calculator: PASS
+Search: PASS
+Todo: PASS
+Session Isolation: PASS
+User Isolation: PASS
+History Recall: PASS
+Context Compression: PASS
+Trace Logging: PASS
+Persistence After Restart: PASS
+
+Overall: PASS
+
+12. 任意关键检查失败时退出码非 0。
+13. 不打印 API Key。
+14. 不打印 Authorization。
+15. 正确关闭 LLM Client。
+
+十四、仓库检查脚本
+
+新增：
+
+scripts/repository_audit.py
+
+运行：
+
+python -m scripts.repository_audit
+
+检查：
+
+1. .env 被 .gitignore 忽略。
+2. .venv 被忽略。
+3. data/*.db 被忽略。
+4. data/*.db-wal 被忽略。
+5. data/*.db-shm 被忽略。
+6. Git 已跟踪文件中不存在 .env。
+7. Git 已跟踪文件中不存在数据库文件。
+8. requirements.txt 不包含：
+   - langchain
+   - langgraph
+   - openhands
+   - openclaw
+   - openai-agents
+9. 代码中没有这些框架的 import。
+10. required 文件存在：
+   - README.md
+   - docs/AI_PROMPTS.md
+   - docs/PROBLEM_SOLVING.md
+   - docs/WEB_UI_CHECKLIST.md
+11. 前端没有外部 CDN。
+12. 没有明显真实密钥格式。
+
+注意：
+
+- 示例占位符如 your_api_key 不应误报。
+- 不打印发现的完整疑似密钥，只打印文件名和风险类型。
+- 检查失败时退出码非 0。
+- 通过时打印 Repository audit: PASS。
+
+十五、文档
+
+新增：
+
+docs/TEST_PLAN.md
+
+内容：
+
+1. 测试层次：
+   - 单元测试
+   - 集成测试
+   - API 测试
+   - 端到端测试
+   - 手动 UI 测试
+   - 真实 LLM 验收
+
+2. 每类测试覆盖范围。
+3. Fake LLM 与真实 LLM 测试的区别。
+4. 如何运行完整测试。
+5. 如何运行最终验收。
+6. 如何运行仓库检查。
+7. 并发测试说明。
+8. 已知无法稳定自动测试的内容。
+
+新增：
+
+docs/KNOWN_LIMITATIONS.md
+
+至少说明：
+
+1. 当前用户 ID 只是演示隔离标识，不是正式鉴权。
+2. Session 锁只在单 Python 进程内有效。
+3. Mock Search 不是实时互联网搜索。
+4. Context 使用字符估算，不是精确 Tokenizer。
+5. 基础摘要是规则压缩，不是语义摘要。
+6. SQLite 适合最小可用项目，不适合高并发分布式部署。
+7. LLM 输出可能受兼容服务差异影响。
+8. 前端未使用完整 Markdown 解析器。
+9. 当前 Todo 面板以查看为主。
+10. 项目目标是最小可用 Agent，不是生产级平台。
+
+更新 README：
+
+1. 增加测试章节。
+2. 增加最终验收命令。
+3. 增加仓库检查命令。
+4. 增加并发保护说明。
+5. 链接到 TEST_PLAN 和 KNOWN_LIMITATIONS。
+6. 更新当前测试数量时避免写死，使用“400+ tests”或实际命令输出说明。
+7. 明确所有测试不等于生产级安全审计。
+
+将完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+更新：
+
+docs/PROBLEM_SOLVING.md
+
+记录：
+
+1. 为什么需要 Session 级锁。
+2. 为什么不做跨进程锁。
+3. 如何避免并发 Chat 历史错乱。
+4. 如何处理异常后释放锁。
+5. 如何加固错误信息。
+6. 如何测试 SQL 注入风格输入。
+7. 如何测试多用户隔离。
+8. Fake LLM 端到端测试和真实验收的区别。
+9. Repository Audit 的作用。
+10. 当前系统的已知限制。
+
+十六、限制
+
+1. 不实现正式登录系统。
+2. 不实现分布式锁。
+3. 不迁移 PostgreSQL。
+4. 不替换 SQLite。
+5. 不增加 Agent 框架。
+6. 不增加前端框架。
+7. 不自动执行 git commit。
+8. 不自动执行 git push。
+
+十七、完成后
+
+1. 运行专项测试：
+
+python -m pytest \
+  tests/test_end_to_end.py \
+  tests/test_concurrency.py \
+  tests/test_error_hardening.py \
+  tests/test_web_hardening.py -q
+
+2. 运行完整测试：
+
+python -m pytest -q
+
+3. 运行仓库检查：
+
+python -m scripts.repository_audit
+
+4. 运行真实最终验收：
+
+python -m scripts.final_acceptance
+
+5. 修复所有失败。
+6. 输出测试结果。
+7. 输出最终验收结果。
+8. 列出创建和修改文件。
+9. 不执行 git commit。
+10. 不执行 git push。
 ````
 
 ## Stage 09B：Todo、Trace 时间线与运行 Inspector

@@ -401,6 +401,8 @@ class SQLiteStore:
         """Atomically store one user message and its final assistant answer."""
         user_id, session_id = self._validate_scope(user_id, session_id)
         user_content = self._validate_text(user_content, "user_content")
+        if len(user_content) > 8000:
+            raise ValueError("user_content must not exceed 8000 characters.")
         assistant_content = self._validate_text(
             assistant_content,
             "assistant_content",
@@ -478,7 +480,7 @@ class SQLiteStore:
     ) -> List[MessageRecord]:
         user_id, session_id = self._validate_scope(user_id, session_id)
         if limit is not None:
-            self._validate_positive_integer(limit, "limit")
+            self._validate_bounded_integer(limit, "limit", 1, 500)
         try:
             with self._connection() as connection:
                 if limit is None:
@@ -826,6 +828,8 @@ class SQLiteStore:
     def add_todo(self, user_id: str, session_id: str, content: str) -> TodoRecord:
         user_id, session_id = self._validate_scope(user_id, session_id)
         content = self._validate_text(content, "content")
+        if len(content) > 1000:
+            raise ValueError("content must not exceed 1000 characters.")
         timestamp = self._now()
         with self._lock:
             try:
@@ -1008,19 +1012,29 @@ class SQLiteStore:
         return datetime.now(timezone.utc).isoformat()
 
     @staticmethod
-    def _validate_text(value: Any, field_name: str) -> str:
+    def _validate_text(
+        value: Any,
+        field_name: str,
+        max_chars: Optional[int] = None,
+    ) -> str:
         if not isinstance(value, str):
             raise ValueError("{} must be a string.".format(field_name))
         value = value.strip()
         if not value:
             raise ValueError("{} must not be empty.".format(field_name))
+        if max_chars is None and field_name in {"user_id", "session_id"}:
+            max_chars = 128
+        if max_chars is not None and len(value) > max_chars:
+            raise ValueError(
+                "{} must not exceed {} characters.".format(field_name, max_chars)
+            )
         return value
 
     @classmethod
     def _validate_scope(cls, user_id: str, session_id: str) -> tuple[str, str]:
         return (
-            cls._validate_text(user_id, "user_id"),
-            cls._validate_text(session_id, "session_id"),
+            cls._validate_text(user_id, "user_id", max_chars=128),
+            cls._validate_text(session_id, "session_id", max_chars=128),
         )
 
     @classmethod
@@ -1040,6 +1054,25 @@ class SQLiteStore:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(
                 "{} must be an integer greater than or equal to 0.".format(field_name)
+            )
+
+    @staticmethod
+    def _validate_bounded_integer(
+        value: Any,
+        field_name: str,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < minimum
+            or value > maximum
+        ):
+            raise ValueError(
+                "{} must be an integer from {} to {}.".format(
+                    field_name, minimum, maximum
+                )
             )
 
     @staticmethod

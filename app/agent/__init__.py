@@ -18,6 +18,7 @@ from app.agent.runtime import (
     AgentStep,
 )
 from app.agent.session_service import SessionAgentService, SessionChatResult
+from app.agent.session_locks import SessionLockManager
 
 __all__ = [
     "ParsedToolCall",
@@ -36,4 +37,5 @@ __all__ = [
     "AgentDecisionError",
     "SessionAgentService",
     "SessionChatResult",
+    "SessionLockManager",
 ]

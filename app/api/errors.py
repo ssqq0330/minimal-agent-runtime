@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from app.security import sanitize_error_message
 
 from app.agent import (
     AgentDecisionError,
@@ -30,7 +31,7 @@ from app.observability import (
 def error_response(status_code: int, code: str, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content={"error": {"code": code, "message": message}},
+        content={"error": {"code": code, "message": sanitize_error_message(message)}},
     )
 
 
@@ -72,6 +73,12 @@ def install_exception_handlers(app: FastAPI) -> None:
 
     app.add_exception_handler(RequestValidationError, validation_handler)
 
+    async def unexpected_handler(request: Request, error: Exception) -> JSONResponse:
+        del request, error
+        return error_response(500, "internal_error", "服务器内部错误")
+
+    app.add_exception_handler(Exception, unexpected_handler)
+
 
 def _handler(
     status_code: int,
@@ -85,4 +92,4 @@ def _handler(
     return handle
 
 
-__all__ = ["error_response", "install_exception_handlers"]
+__all__ = ["error_response", "install_exception_handlers", "sanitize_error_message"]

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.memory.context import ContextBuildResult
 from app.memory.store import MemoryStoreError, SQLiteStore
+from app.security import sanitize_error_message
 
 if TYPE_CHECKING:
     from app.agent.runtime import AgentRunResult
@@ -158,6 +159,11 @@ def _sanitize_string(value: str, max_chars: int) -> str:
         r"(?:Bearer\s+)?[^\s\"',;}\]]+",
         lambda match: "{}=[REDACTED]".format(match.group(1)),
         value,
+    )
+    redacted = re.sub(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer [REDACTED]",
+        redacted,
     )
     if len(redacted) <= max_chars:
         return redacted
@@ -322,10 +328,9 @@ class SQLiteTraceRecorder:
             raise TraceValidationError("error must be an Exception.")
         self._require_running(run_id)
         error_type = error.__class__.__name__
-        error_message = str(error).strip() or "Error without a message."
-        error_message = sanitize_trace_payload(
-            error_message,
-            max_string_chars=1000,
+        error_message = sanitize_error_message(
+            str(error).strip() or "Error without a message.",
+            max_chars=1000,
         )
         self._append_event(
             run_id,
@@ -446,6 +451,10 @@ class SQLiteTraceRecorder:
         value = value.strip()
         if not value:
             raise TraceValidationError("{} must not be empty.".format(field_name))
+        if field_name in {"user_id", "session_id"} and len(value) > 128:
+            raise TraceValidationError(
+                "{} must not exceed 128 characters.".format(field_name)
+            )
         return value
 
     @staticmethod

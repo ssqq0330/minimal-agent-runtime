@@ -15,20 +15,20 @@ class _TrimmedModel(BaseModel):
 
 
 class CreateSessionRequest(_TrimmedModel):
-    user_id: str = Field(min_length=1)
-    session_id: Optional[str] = Field(default=None, min_length=1)
+    user_id: str = Field(min_length=1, max_length=128)
+    session_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     title: str = Field(default="新会话", min_length=1, max_length=200)
 
 
 class UpdateSessionRequest(_TrimmedModel):
-    user_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=200)
 
 
 class ChatRequest(_TrimmedModel):
-    user_id: str = Field(min_length=1)
-    session_id: str = Field(min_length=1)
-    message: str = Field(min_length=1)
+    user_id: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=8000)
 
 
 class SessionResponse(BaseModel):

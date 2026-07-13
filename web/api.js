@@ -22,6 +22,9 @@ export async function apiRequest(path, options = {}) {
   try {
     response = await fetch(path, requestOptions);
   } catch (error) {
+    if (error && error.name === "AbortError") {
+      throw new ApiError("请求已取消。", 0, "request_aborted");
+    }
     throw new ApiError("无法连接后端服务，请确认 FastAPI 已启动。", 0, "network_error");
   }
 
@@ -72,6 +75,20 @@ function tracePath(runId = "") {
   return runId ? `/api/traces/${encodeURIComponent(runId)}` : "/api/traces";
 }
 
+function expectArray(payload, resourceName) {
+  if (!Array.isArray(payload)) {
+    throw new ApiError(`后端返回的${resourceName}格式无效。`, 200, "invalid_response");
+  }
+  return payload;
+}
+
+function expectObject(payload, resourceName) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new ApiError(`后端返回的${resourceName}格式无效。`, 200, "invalid_response");
+  }
+  return payload;
+}
+
 export function healthCheck() {
   return apiRequest("/api/health");
 }
@@ -83,8 +100,11 @@ export function createSession(payload) {
   });
 }
 
-export function listSessions(userId) {
-  return apiRequest(`/api/sessions?${query({ user_id: userId })}`);
+export async function listSessions(userId, { signal } = {}) {
+  return expectArray(
+    await apiRequest(`/api/sessions?${query({ user_id: userId })}`, { signal }),
+    "Session 列表",
+  );
 }
 
 export function getSession(userId, sessionId) {
@@ -104,10 +124,11 @@ export function deleteSession(userId, sessionId) {
   });
 }
 
-export function listMessages(userId, sessionId, limit = 200) {
-  return apiRequest(
+export async function listMessages(userId, sessionId, limit = 200, { signal } = {}) {
+  return expectArray(await apiRequest(
     `${sessionPath(sessionId, "/messages")}?${query({ user_id: userId, limit: String(limit) })}`,
-  );
+    { signal },
+  ), "消息列表");
 }
 
 export function clearMessages(userId, sessionId) {
@@ -117,22 +138,23 @@ export function clearMessages(userId, sessionId) {
   );
 }
 
-export function sendChat(payload) {
-  return apiRequest("/api/chat", {
+export async function sendChat(payload) {
+  return expectObject(await apiRequest("/api/chat", {
     method: "POST",
     body: JSON.stringify(payload),
-  });
+  }), "Chat 响应");
 }
 
-export function listTodos(userId, sessionId) {
+export function listTodos(userId, sessionId, { signal } = {}) {
   return apiRequest(
     `${sessionPath(sessionId, "/todos")}?${query({ user_id: userId })}`,
-  );
+    { signal },
+  ).then((payload) => expectArray(payload, "Todo 列表"));
 }
 
 export function listTraceRuns(
   userId,
-  { sessionId = null, status = null, limit = 50 } = {},
+  { sessionId = null, status = null, limit = 50, signal } = {},
 ) {
   const parameters = { user_id: userId, limit: String(limit) };
   if (sessionId) {
@@ -141,11 +163,13 @@ export function listTraceRuns(
   if (status) {
     parameters.status = status;
   }
-  return apiRequest(`${tracePath()}?${query(parameters)}`);
+  return apiRequest(`${tracePath()}?${query(parameters)}`, { signal })
+    .then((payload) => expectArray(payload, "Trace 列表"));
 }
 
-export function getTrace(userId, runId) {
-  return apiRequest(`${tracePath(runId)}?${query({ user_id: userId })}`);
+export function getTrace(userId, runId, { signal } = {}) {
+  return apiRequest(`${tracePath(runId)}?${query({ user_id: userId })}`, { signal })
+    .then((payload) => expectObject(payload, "Trace 详情"));
 }
 
 export function deleteTrace(userId, runId) {

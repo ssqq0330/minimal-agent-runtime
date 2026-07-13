@@ -419,4 +419,48 @@ AgentDecision(final/tool_call)
      Return result to LLM and continue
 ```
 
-The multi-window web UI and long-term user memory remain future milestones.
+The browser UI now provides multi-Session chat, Session-scoped Todo inspection,
+Trace timelines, compact Context metrics, safe lightweight Markdown, and
+responsive Session/Inspector drawers without a frontend build step.
+
+## Concurrency and hardening
+
+`SessionAgentService.chat` holds a lock keyed by `user_id + session_id` around
+the complete stateful turn. Concurrent requests for the same scope therefore
+load and save history in order, while different Sessions and different users
+can proceed independently. Locks are released on every exception and idle lock
+entries are removed. This guarantee is intentionally limited to one Python
+process; it is not a distributed lock.
+
+HTTP schemas, Store APIs and tools enforce the documented identifier, title,
+message, Todo, search and calculator limits. Client-visible errors and failed
+Trace records share bounded credential redaction. The native browser client
+cancels stale history/Inspector reads and verifies Chat ownership before
+rendering an old response.
+
+## Testing and final acceptance
+
+The repository has 400+ deterministic tests across unit, integration, API,
+end-to-end, concurrency, security and Web hardening layers. Run all tests with:
+
+```bash
+python -m pytest -q
+```
+
+After configuring `.env`, run the real-LLM acceptance flow against only
+`data/final-acceptance.db`:
+
+```bash
+python -m scripts.final_acceptance
+```
+
+Audit ignore rules, tracked artifacts, prohibited frameworks, external CDNs
+and obvious credential patterns with:
+
+```bash
+python -m scripts.repository_audit
+```
+
+See [the test plan](docs/TEST_PLAN.md) and
+[known limitations](docs/KNOWN_LIMITATIONS.md). Passing these checks is not a
+production security audit or certification.

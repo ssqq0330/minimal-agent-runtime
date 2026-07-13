@@ -18,7 +18,11 @@ class MockSearchTool(BaseTool):
     parameters_schema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "要搜索的关键词"},
+            "query": {
+                "type": "string",
+                "description": "要搜索的关键词",
+                "maxLength": 1000,
+            },
             "limit": {
                 "type": "integer",
                 "description": "返回结果数量，默认 3",
@@ -70,6 +74,8 @@ class MockSearchTool(BaseTool):
         query = arguments["query"].strip()
         if not query:
             return ToolResult(False, None, "Argument 'query' must not be empty.")
+        if len(query) > 1000:
+            return ToolResult(False, None, "Query must not exceed 1000 characters.")
 
         limit = arguments.get("limit", 3)
         normalized_query = query.casefold()

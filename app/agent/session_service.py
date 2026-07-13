@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.agent.runtime import AgentRunResult, AgentRuntime
+from app.agent.session_locks import SessionLockManager
 from app.memory.context import BasicContextManager, ContextBuildResult
 from app.memory.store import (
     MessageRecord,
@@ -77,6 +78,7 @@ class SessionAgentService:
         history_limit: Optional[int] = None,
         context_manager: Optional[BasicContextManager] = None,
         trace_recorder: Optional[SQLiteTraceRecorder] = None,
+        lock_manager: Optional[SessionLockManager] = None,
     ) -> None:
         if not isinstance(runtime, AgentRuntime):
             raise ValueError("runtime must be an AgentRuntime.")
@@ -92,6 +94,8 @@ class SessionAgentService:
             SQLiteTraceRecorder,
         ):
             raise TypeError("trace_recorder must be a SQLiteTraceRecorder or None.")
+        if lock_manager is not None and not isinstance(lock_manager, SessionLockManager):
+            raise TypeError("lock_manager must be a SessionLockManager or None.")
         self._validate_limit(history_limit, "history_limit")
         self.runtime = runtime
         self.store = store
@@ -106,6 +110,7 @@ class SessionAgentService:
             if trace_recorder is not None
             else SQLiteTraceRecorder(store)
         )
+        self.lock_manager = lock_manager or SessionLockManager()
 
     def chat(
         self,
@@ -114,9 +119,19 @@ class SessionAgentService:
         user_input: str,
     ) -> SessionChatResult:
         """Run one Session turn and atomically persist it after Runtime success."""
-        user_id = self._validate_text(user_id, "user_id")
-        session_id = self._validate_text(session_id, "session_id")
-        user_input = self._validate_text(user_input, "user_input")
+        user_id = self._validate_text(user_id, "user_id", max_chars=128)
+        session_id = self._validate_text(session_id, "session_id", max_chars=128)
+        user_input = self._validate_text(user_input, "user_input", max_chars=8000)
+        with self.lock_manager.acquire(user_id, session_id):
+            return self._chat_locked(user_id, session_id, user_input)
+
+    def _chat_locked(
+        self,
+        user_id: str,
+        session_id: str,
+        user_input: str,
+    ) -> SessionChatResult:
+        """Execute the full stateful turn while its Session lock is held."""
         self._require_session(user_id, session_id)
         trace_run = self.trace_recorder.start_run(user_id, session_id, user_input)
 
@@ -223,20 +238,33 @@ class SessionAgentService:
         }
 
     @staticmethod
-    def _validate_text(value: Any, field_name: str) -> str:
+    def _validate_text(
+        value: Any,
+        field_name: str,
+        max_chars: Optional[int] = None,
+    ) -> str:
         if not isinstance(value, str):
             raise ValueError("{} must be a string.".format(field_name))
         value = value.strip()
         if not value:
             raise ValueError("{} must not be empty.".format(field_name))
+        if max_chars is not None and len(value) > max_chars:
+            raise ValueError(
+                "{} must not exceed {} characters.".format(field_name, max_chars)
+            )
         return value
 
     @staticmethod
     def _validate_limit(value: Optional[int], field_name: str) -> None:
         if value is None:
             return
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ValueError("{} must be an integer greater than 0.".format(field_name))
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            or value > 500
+        ):
+            raise ValueError("{} must be an integer from 1 to 500.".format(field_name))
 
 
 def _context_stats(context_result: ContextBuildResult) -> Dict[str, Any]:

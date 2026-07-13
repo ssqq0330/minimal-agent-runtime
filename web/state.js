@@ -110,6 +110,7 @@ export function setActiveSession(sessionId) {
   state.activeSessionId = valid ? sessionId : null;
   state.messages = [];
   state.lastRunId = null;
+  state.isSending = false;
   clearInspectorState();
   writeStoredValue(STORAGE_KEYS.activeSessionId, state.activeSessionId);
 }

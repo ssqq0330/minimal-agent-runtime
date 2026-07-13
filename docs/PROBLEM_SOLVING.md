@@ -408,3 +408,16 @@
 - Trace 时间线映射：每个后端事件变成带 sequence 标记的卡片；Context 和决策展示白名单字段，工具参数与结果放在可折叠 `pre` 中，未知事件以通用 JSON 安全展示。
 - 运行耗时：只有合法的 `started_at` 与 `finished_at` 都存在且结束时间不早于开始时间时才在浏览器计算差值；缺失或非法值统一显示“—”。
 - 移动端 Inspector：桌面使用第三列；中等和移动宽度使用固定右侧抽屉。Session 与 Inspector 分别由独立 body 状态控制，Escape 只关闭当前打开的 Inspector 抽屉。
+
+## 2026-07-13: Stage 10 — 端到端测试、并发与异常加固
+
+- 为什么需要 Session 级锁：同一 Session 的两个 Chat 若同时读取历史，会基于相同旧 Context 运行并以不可预测顺序保存。以 `user_id + session_id` 为键串行化完整核心流程，第二轮一定能读取第一轮的最终 Exchange。
+- 为什么不做跨进程锁：项目仍是单进程最小运行时，分布式锁会引入外部服务、租约和故障恢复协议。README 明确当前保证不适用于多 Worker。
+- 锁生命周期：管理器锁只保护字典与引用计数；每个 Session 的 `RLock` 保护 Chat。`finally` 释放锁并在最后一个持有者/等待者离开后删除字典项，Runtime、Context、Store 或 Trace 异常均不会永久占锁。
+- 错误信息加固：`sanitize_error_message` 生成有长度上限的副本，过滤 API Key、Authorization/Bearer、password、secret、Token 和 `.env` 风格值。API 固定错误、未知 500、工具异常与 failed Trace 不直接暴露原 Exception。
+- SQL 注入风格输入：测试把 `Robert'); DROP TABLE sessions;--` 作为普通 Chat 内容经 API、Runtime 与 SQLite 保存，再直接查询 `sessions` 表确认结构仍在；所有 SQL 继续使用参数绑定。
+- 多用户隔离：端到端测试让两个用户使用相同 Session ID，并分别检查消息、Todo、Trace 的读取和删除边界。资源不存在与资源属于他人统一表现为 404，避免所有权探测。
+- Fake LLM 与真实验收：Fake LLM 提供可重复的工具决策和错误，适合完整 CI 断言；`final_acceptance` 验证真实兼容服务是否遵守结构化协议，但其网络和模型措辞具有非确定性。
+- Repository Audit：脚本检查忽略规则、跟踪文件、禁用框架、CDN、必需文档和明显真实密钥。只报告文件名与风险类型，不输出疑似凭据。
+- 前端竞态：历史、Todo、Trace 列表和详情使用 AbortController 加请求版本；Chat 不强制取消，但返回时必须匹配请求版本、用户、Session 和仍存在的 Session 记录。
+- 已知限制：身份、跨进程协调、实时搜索、精确 Token 估算、语义摘要、分布式数据库和完整 Markdown 均刻意保持在当前项目范围之外，详见 `KNOWN_LIMITATIONS.md`。

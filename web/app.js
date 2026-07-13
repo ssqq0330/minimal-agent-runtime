@@ -80,6 +80,8 @@ const dom = {
 let preferredSessionId = null;
 let sessionRequestVersion = 0;
 let messageRequestVersion = 0;
+let chatRequestVersion = 0;
+let messageAbortController = null;
 
 function activeSession() {
   return state.sessions.find((session) => session.session_id === state.activeSessionId) || null;
@@ -286,15 +288,21 @@ function renderCurrentSession() {
 function renderControls() {
   const hasSession = Boolean(activeSession());
   const chatBlocked = !hasSession || !state.serviceAvailable || state.isSending;
+  const messageLength = dom.messageInput.value.length;
+  const messageTooLong = messageLength > MAX_MESSAGE_LENGTH;
   dom.messageInput.disabled = chatBlocked;
-  dom.sendButton.disabled = chatBlocked || dom.messageInput.value.trim().length === 0;
+  dom.messageInput.setAttribute("aria-invalid", String(messageTooLong));
+  dom.sendButton.disabled = chatBlocked
+    || dom.messageInput.value.trim().length === 0
+    || messageTooLong;
   dom.renameSessionButton.disabled = !hasSession || state.isSending;
   dom.deleteSessionButton.disabled = !hasSession || state.isSending;
   dom.clearMessagesButton.disabled = !hasSession || state.isSending || state.messages.length === 0;
-  dom.applyUserButton.disabled = state.isLoadingSessions || state.isSending;
+  dom.applyUserButton.disabled = state.isLoadingSessions;
   dom.newSessionButton.disabled = state.isLoadingSessions || !state.databaseAvailable;
   dom.refreshSessionsButton.disabled = state.isLoadingSessions;
-  dom.characterCount.textContent = `${dom.messageInput.value.length} / ${MAX_MESSAGE_LENGTH}`;
+  dom.characterCount.textContent = `${messageLength} / ${MAX_MESSAGE_LENGTH}`;
+  dom.characterCount.classList.toggle("is-over-limit", messageTooLong);
   dom.messageInput.placeholder = hasSession
     ? "描述任务、追问上下文或让 Agent 调用工具…"
     : "选择 Session 后输入消息…";
@@ -361,6 +369,18 @@ function friendlyError(error, fallbackMessage) {
   if (error.status === 503 || error.code === "llm_unavailable") {
     return "LLM 尚未配置，请检查服务端 .env。";
   }
+  if (error.status === 502) {
+    return "模型服务请求失败，请稍后重试。";
+  }
+  if (error.status === 508) {
+    return "Agent 已达到最大执行步数，请简化任务后重试。";
+  }
+  if (error.status === 422) {
+    return "输入格式或长度不符合要求，请检查后重试。";
+  }
+  if (error.code === "invalid_response") {
+    return "后端返回格式异常，请刷新后重试。";
+  }
   if (error.code === "network_error") {
     markServiceOffline();
     return error.message;
@@ -393,6 +413,8 @@ async function checkHealth({ announceRecovery = false } = {}) {
 
 async function loadActiveMessages() {
   const requestVersion = ++messageRequestVersion;
+  messageAbortController?.abort();
+  messageAbortController = new AbortController();
   const requestUserId = state.userId;
   const requestSessionId = state.activeSessionId;
   patchState({ messages: [], isLoadingMessages: Boolean(requestSessionId), lastRunId: null });
@@ -404,7 +426,9 @@ async function loadActiveMessages() {
   }
 
   try {
-    const messages = await listMessages(requestUserId, requestSessionId, 200);
+    const messages = await listMessages(requestUserId, requestSessionId, 200, {
+      signal: messageAbortController.signal,
+    });
     if (
       requestVersion !== messageRequestVersion
       || state.userId !== requestUserId
@@ -418,7 +442,7 @@ async function loadActiveMessages() {
     renderInspector();
     scrollToLatest();
   } catch (error) {
-    if (requestVersion !== messageRequestVersion) {
+    if (requestVersion !== messageRequestVersion || error.code === "request_aborted") {
       return;
     }
     patchState({ isLoadingMessages: false, messages: [] });
@@ -475,9 +499,10 @@ async function refreshSessions({
 }
 
 async function selectSession(sessionId) {
-  if (sessionId === state.activeSessionId || state.isSending) {
+  if (sessionId === state.activeSessionId) {
     return;
   }
+  chatRequestVersion += 1;
   setActiveSession(sessionId);
   messageRequestVersion += 1;
   renderSessionList();
@@ -509,6 +534,8 @@ async function applyUser(event) {
   }
   sessionRequestVersion += 1;
   messageRequestVersion += 1;
+  chatRequestVersion += 1;
+  messageAbortController?.abort();
   changeUser(userId);
   renderAll();
   showToast(`已切换到用户 ${userId}。`, "info");
@@ -590,6 +617,7 @@ async function submitDelete(event) {
       return;
     }
     closeDialog(dom.deleteDialog);
+    chatRequestVersion += 1;
     setActiveSession(null);
     showToast("Session 及其关联数据已删除。", "success");
     await refreshSessions({ preferredId: null, loadMessagesAfter: true });
@@ -653,6 +681,8 @@ async function submitMessage(event) {
     return;
   }
 
+  const requestVersion = ++chatRequestVersion;
+
   const pendingId = `pending-${Date.now()}`;
   const pendingMessage = {
     id: pendingId,
@@ -662,7 +692,13 @@ async function submitMessage(event) {
     metadata: null,
     pending: true,
   };
-  patchState({ messages: [...state.messages, pendingMessage], isSending: true });
+  patchState({
+    messages: [
+      ...state.messages.filter((message) => !(message.failed && message.content === content)),
+      pendingMessage,
+    ],
+    isSending: true,
+  });
   renderMessages();
   renderControls();
   scrollToLatest();
@@ -673,7 +709,10 @@ async function submitMessage(event) {
       session_id: requestSessionId,
       message: content,
     });
-    const ownsResponse = state.userId === requestUserId && state.activeSessionId === requestSessionId;
+    const ownsResponse = requestVersion === chatRequestVersion
+      && state.userId === requestUserId
+      && state.activeSessionId === requestSessionId
+      && state.sessions.some((session) => session.session_id === requestSessionId);
     if (ownsResponse) {
       const messages = state.messages.filter((message) => message.id !== pendingId);
       patchState({
@@ -688,7 +727,9 @@ async function submitMessage(event) {
     }
     await refreshSessions({ preferredId: state.activeSessionId });
   } catch (error) {
-    const ownsResponse = state.userId === requestUserId && state.activeSessionId === requestSessionId;
+    const ownsResponse = requestVersion === chatRequestVersion
+      && state.userId === requestUserId
+      && state.activeSessionId === requestSessionId;
     if (ownsResponse) {
       patchState({
         messages: state.messages.map((message) => (
@@ -698,15 +739,20 @@ async function submitMessage(event) {
       renderMessages();
       scrollToLatest();
     }
-    showToast(friendlyError(error, "消息发送失败，请稍后重试。"), "error", { persistent: true });
+    if (ownsResponse) {
+      showToast(friendlyError(error, "消息发送失败，请稍后重试。"), "error", { persistent: true });
+    }
     if (error instanceof ApiError && error.status === 404) {
       await refreshSessions({ loadMessagesAfter: true });
     }
   } finally {
-    patchState({ isSending: false });
-    renderMessages();
-    renderControls();
-    if (state.userId === requestUserId && state.activeSessionId === requestSessionId) {
+    const ownsRequest = requestVersion === chatRequestVersion
+      && state.userId === requestUserId
+      && state.activeSessionId === requestSessionId;
+    if (ownsRequest) {
+      patchState({ isSending: false });
+      renderMessages();
+      renderControls();
       dom.messageInput.focus();
     }
   }

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.tools.base import BaseTool, ToolContext, ToolResult
+from app.security import sanitized_exception_message
 
 if TYPE_CHECKING:
     from app.memory.store import SQLiteStore
@@ -62,7 +63,10 @@ class ToolRegistry:
             return ToolResult(
                 False,
                 None,
-                "Tool '{}' failed: {}".format(name, str(error) or error.__class__.__name__),
+                "Tool '{}' failed: {}".format(
+                    name,
+                    sanitized_exception_message(error, max_chars=500),
+                ),
             )
 
 

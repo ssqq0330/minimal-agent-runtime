@@ -21,6 +21,7 @@ class CalculatorTool(BaseTool):
             "expression": {
                 "type": "string",
                 "description": "需要计算的数学表达式",
+                "maxLength": 200,
             }
         },
         "required": ["expression"],

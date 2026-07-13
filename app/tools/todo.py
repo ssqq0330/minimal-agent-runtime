@@ -22,7 +22,11 @@ class TodoTool(BaseTool):
                 "type": "string",
                 "enum": ["add", "list", "complete", "delete"],
             },
-            "content": {"type": "string", "description": "待办内容"},
+            "content": {
+                "type": "string",
+                "description": "待办内容",
+                "maxLength": 1000,
+            },
             "todo_id": {"type": "integer", "description": "待办编号"},
         },
         "required": ["action"],
@@ -80,6 +84,8 @@ class TodoTool(BaseTool):
         content = content.strip()
         if not content:
             return ToolResult(False, None, "Argument 'content' must not be empty.")
+        if len(content) > 1000:
+            return ToolResult(False, None, "Todo content must not exceed 1000 characters.")
 
         if self._store is not None:
             todo = self._store.add_todo(

@@ -61,6 +61,9 @@ const TAB_NAMES = ["overview", "todo", "trace"];
 let todoRequestVersion = 0;
 let traceListRequestVersion = 0;
 let traceDetailRequestVersion = 0;
+let todoAbortController = null;
+let traceListAbortController = null;
+let traceDetailAbortController = null;
 let notify = () => {};
 let describeError = (error, fallback) => (error && error.message) || fallback;
 
@@ -397,12 +400,17 @@ export function resetInspector() {
   todoRequestVersion += 1;
   traceListRequestVersion += 1;
   traceDetailRequestVersion += 1;
+  todoAbortController?.abort();
+  traceListAbortController?.abort();
+  traceDetailAbortController?.abort();
   clearInspectorState();
   renderInspector();
 }
 
 export async function refreshTodos({ quiet = false } = {}) {
   const requestVersion = ++todoRequestVersion;
+  todoAbortController?.abort();
+  todoAbortController = new AbortController();
   const requestUserId = state.userId;
   const requestSessionId = state.activeSessionId;
   patchState({ todos: [], isLoadingTodos: Boolean(requestSessionId) });
@@ -411,7 +419,9 @@ export async function refreshTodos({ quiet = false } = {}) {
     return;
   }
   try {
-    const todos = await listTodos(requestUserId, requestSessionId);
+    const todos = await listTodos(requestUserId, requestSessionId, {
+      signal: todoAbortController.signal,
+    });
     const ownsResponse = requestVersion === todoRequestVersion
       && state.userId === requestUserId
       && state.activeSessionId === requestSessionId;
@@ -421,7 +431,7 @@ export async function refreshTodos({ quiet = false } = {}) {
     patchState({ todos, isLoadingTodos: false });
     renderTodos();
   } catch (error) {
-    if (requestVersion !== todoRequestVersion) {
+    if (requestVersion !== todoRequestVersion || error.code === "request_aborted") {
       return;
     }
     patchState({ todos: [], isLoadingTodos: false });
@@ -434,6 +444,8 @@ export async function refreshTodos({ quiet = false } = {}) {
 
 export async function loadTraceDetail(runId) {
   const requestVersion = ++traceDetailRequestVersion;
+  traceDetailAbortController?.abort();
+  traceDetailAbortController = new AbortController();
   const requestUserId = state.userId;
   const requestSessionId = state.activeSessionId;
   patchState({ selectedRunId: runId, traceDetail: null, isLoadingTraceDetail: Boolean(runId) });
@@ -444,7 +456,9 @@ export async function loadTraceDetail(runId) {
     return;
   }
   try {
-    const detail = await getTrace(requestUserId, runId);
+    const detail = await getTrace(requestUserId, runId, {
+      signal: traceDetailAbortController.signal,
+    });
     const ownsResponse = requestVersion === traceDetailRequestVersion
       && state.userId === requestUserId
       && state.activeSessionId === requestSessionId
@@ -459,7 +473,11 @@ export async function loadTraceDetail(runId) {
     renderTraceDetail();
     renderOverview();
   } catch (error) {
-    if (requestVersion !== traceDetailRequestVersion || state.selectedRunId !== runId) {
+    if (
+      requestVersion !== traceDetailRequestVersion
+      || state.selectedRunId !== runId
+      || error.code === "request_aborted"
+    ) {
       return;
     }
     patchState({
@@ -476,6 +494,8 @@ export async function loadTraceDetail(runId) {
 
 export async function refreshTraceRuns({ preferredRunId = state.lastRunId, quiet = false } = {}) {
   const requestVersion = ++traceListRequestVersion;
+  traceListAbortController?.abort();
+  traceListAbortController = new AbortController();
   const requestUserId = state.userId;
   const requestSessionId = state.activeSessionId;
   patchState({ traceRuns: [], isLoadingTraceRuns: Boolean(requestSessionId) });
@@ -484,7 +504,11 @@ export async function refreshTraceRuns({ preferredRunId = state.lastRunId, quiet
     return;
   }
   try {
-    const runs = await listTraceRuns(requestUserId, { sessionId: requestSessionId, limit: 50 });
+    const runs = await listTraceRuns(requestUserId, {
+      sessionId: requestSessionId,
+      limit: 50,
+      signal: traceListAbortController.signal,
+    });
     const ownsResponse = requestVersion === traceListRequestVersion
       && state.userId === requestUserId
       && state.activeSessionId === requestSessionId
@@ -507,7 +531,7 @@ export async function refreshTraceRuns({ preferredRunId = state.lastRunId, quiet
       renderOverview();
     }
   } catch (error) {
-    if (requestVersion !== traceListRequestVersion) {
+    if (requestVersion !== traceListRequestVersion || error.code === "request_aborted") {
       return;
     }
     patchState({ traceRuns: [], selectedRunId: null, traceDetail: null, isLoadingTraceRuns: false });
