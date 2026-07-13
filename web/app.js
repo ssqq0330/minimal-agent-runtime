@@ -20,6 +20,13 @@ import {
   setSidebarCollapsed,
   state,
 } from "/static/state.js";
+import {
+  initializeInspector,
+  refreshInspectorAfterChat,
+  refreshInspectorForActiveSession,
+  renderInspector,
+} from "/static/inspector.js";
+import { renderSafeMessage } from "/static/render.js";
 import { formatDateTime } from "/static/utils.js";
 
 const MAX_MESSAGE_LENGTH = 8000;
@@ -240,7 +247,7 @@ function renderMessages() {
 
       const bubble = document.createElement("div");
       bubble.className = "message-bubble";
-      bubble.textContent = message.content;
+      renderSafeMessage(bubble, message.content);
       card.append(byline, bubble);
       const stats = messageStats(message);
       if (stats) {
@@ -300,6 +307,7 @@ function renderAll() {
   renderCurrentSession();
   renderMessages();
   renderControls();
+  renderInspector();
 }
 
 function scrollToLatest() {
@@ -407,6 +415,7 @@ async function loadActiveMessages() {
     patchState({ messages, isLoadingMessages: false });
     renderMessages();
     renderControls();
+    renderInspector();
     scrollToLatest();
   } catch (error) {
     if (requestVersion !== messageRequestVersion) {
@@ -443,8 +452,12 @@ async function refreshSessions({
     renderSessionList();
     renderCurrentSession();
     renderControls();
+    renderInspector();
     if (loadMessagesAfter) {
-      await loadActiveMessages();
+      await Promise.all([
+        loadActiveMessages(),
+        refreshInspectorForActiveSession(),
+      ]);
     } else if (announce) {
       showToast("Session 列表已刷新。", "success");
     }
@@ -471,11 +484,15 @@ async function selectSession(sessionId) {
   renderCurrentSession();
   renderMessages();
   renderControls();
+  renderInspector();
   if (window.matchMedia("(max-width: 760px)").matches) {
     setSidebarCollapsed(true);
     renderSidebarState();
   }
-  await loadActiveMessages();
+  await Promise.all([
+    loadActiveMessages(),
+    refreshInspectorForActiveSession(),
+  ]);
 }
 
 async function applyUser(event) {
@@ -602,9 +619,10 @@ async function submitClear(event) {
       return;
     }
     closeDialog(dom.clearDialog);
-    patchState({ messages: [], lastRunId: null });
+    patchState({ messages: [], lastRunId: null, lastChatResult: null });
     renderMessages();
     renderControls();
+    renderInspector();
     showToast(`已清空 ${result.deleted_count} 条消息。`, "success");
   } catch (error) {
     showToast(friendlyError(error, "清空消息失败。"), "error");
@@ -666,6 +684,7 @@ async function submitMessage(event) {
       renderMessages();
       renderControls();
       scrollToLatest();
+      void refreshInspectorAfterChat(result);
     }
     await refreshSessions({ preferredId: state.activeSessionId });
   } catch (error) {
@@ -758,9 +777,13 @@ async function initialize() {
   const preferences = loadPreferences();
   preferredSessionId = preferences.activeSessionId;
   dom.userInput.value = state.userId;
+  if (window.matchMedia("(max-width: 1280px)").matches && !preferences.inspectorPreferencePresent) {
+    state.inspectorOpen = false;
+  }
   if (window.matchMedia("(max-width: 760px)").matches && !preferences.activeSessionId) {
     setSidebarCollapsed(false);
   }
+  initializeInspector({ notify: showToast, describeError: friendlyError });
   bindEvents();
   renderAll();
   await checkHealth();

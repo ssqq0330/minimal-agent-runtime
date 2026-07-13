@@ -24,6 +24,16 @@
           >
             <span aria-hidden="true">☰</span>
           </button>
+          <button
+            id="toggle-inspector-button"
+            class="icon-button inspector-toggle"
+            type="button"
+            aria-label="收起 Inspector"
+            aria-controls="inspector-panel"
+            aria-expanded="true"
+          >
+            <span aria-hidden="true">◫</span>
+          </button>
           <div>
             <p class="eyebrow">LOCAL AGENT WORKSPACE</p>
             <h1 id="app-title">Minimal Agent Runtime</h1>
@@ -137,6 +147,108 @@
           </div>
         </form>
       </main>
+
+      <aside id="inspector-panel" class="inspector-panel" aria-label="Agent Inspector">
+        <header class="inspector-header">
+          <div>
+            <p class="eyebrow">RUN INSPECTOR</p>
+            <h2>Agent 运行详情</h2>
+          </div>
+          <button id="close-inspector-button" class="icon-button" type="button" aria-label="关闭 Inspector">×</button>
+        </header>
+
+        <div id="inspector-tabs" class="inspector-tabs" role="tablist" aria-label="Inspector 视图">
+          <button
+            id="overview-tab-button"
+            class="inspector-tab is-active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="overview-panel"
+            tabindex="0"
+          >概览</button>
+          <button
+            id="todo-tab-button"
+            class="inspector-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="todo-panel"
+            tabindex="-1"
+          >Todo</button>
+          <button
+            id="trace-tab-button"
+            class="inspector-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="trace-panel"
+            tabindex="-1"
+          >Trace</button>
+        </div>
+
+        <section id="overview-panel" class="inspector-tab-panel" role="tabpanel" aria-labelledby="overview-tab-button">
+          <div id="overview-empty-state" class="inspector-empty-state">尚无 Agent 运行记录</div>
+          <div id="overview-metrics" class="overview-metrics" hidden>
+            <article class="metric-card metric-card-wide">
+              <span>Run ID</span>
+              <div class="run-id-row">
+                <strong id="current-run-id">—</strong>
+                <button id="copy-run-id-button" class="mini-button" type="button" aria-label="复制当前 Run ID" disabled>复制</button>
+              </div>
+            </article>
+            <article class="metric-card"><span>LLM 调用</span><strong id="metric-llm-calls">—</strong></article>
+            <article class="metric-card"><span>工具调用</span><strong id="metric-tool-calls">—</strong></article>
+            <article class="metric-card"><span>Context 压缩</span><strong id="metric-context-compressed">—</strong></article>
+            <article class="metric-card"><span>加载历史</span><strong id="metric-loaded-history">—</strong></article>
+            <article class="metric-card"><span>运行状态</span><strong id="metric-run-status">—</strong></article>
+            <article class="metric-card"><span>运行耗时</span><strong id="metric-run-duration">—</strong></article>
+          </div>
+          <p class="inspector-privacy-note">Inspector 只读取 SQLite 中已过滤的运行数据，不会进入下一轮 LLM Context。</p>
+        </section>
+
+        <section id="todo-panel" class="inspector-tab-panel" role="tabpanel" aria-labelledby="todo-tab-button" hidden>
+          <div class="panel-toolbar">
+            <div>
+              <p class="eyebrow">SESSION TODOS</p>
+              <h3>待办事项</h3>
+            </div>
+            <button id="refresh-todos-button" class="mini-button" type="button" aria-label="刷新当前 Session Todo">刷新</button>
+          </div>
+          <div id="todo-loading" class="inspector-loading" role="status" aria-live="polite" aria-busy="false" hidden>
+            <span class="loading-orbit" aria-hidden="true"></span>正在加载 Todo
+          </div>
+          <div id="todo-list" class="todo-list" aria-live="polite"></div>
+          <div id="todo-empty-state" class="inspector-empty-state">当前 Session 暂无待办</div>
+        </section>
+
+        <section id="trace-panel" class="inspector-tab-panel trace-panel" role="tabpanel" aria-labelledby="trace-tab-button" hidden>
+          <div class="panel-toolbar">
+            <div>
+              <p class="eyebrow">EXECUTION TRACE</p>
+              <h3>运行时间线</h3>
+            </div>
+            <button id="refresh-traces-button" class="mini-button" type="button" aria-label="刷新当前 Session Trace">刷新</button>
+          </div>
+          <div id="trace-loading" class="inspector-loading" role="status" aria-live="polite" aria-busy="false" hidden>
+            <span class="loading-orbit" aria-hidden="true"></span>正在加载 Trace
+          </div>
+          <div id="trace-run-list" class="trace-run-list" aria-label="Trace Run 列表"></div>
+          <div id="trace-empty-state" class="inspector-empty-state">当前 Session 暂无 Trace</div>
+          <div id="trace-detail" class="trace-detail" aria-live="polite">
+            <div class="trace-detail-heading">
+              <h3>Trace 详情</h3>
+              <button id="delete-trace-button" class="danger-button compact-button" type="button" disabled>删除 Trace</button>
+            </div>
+            <div id="trace-detail-empty" class="inspector-empty-state">选择一个 Run 查看完整时间线</div>
+            <div id="trace-detail-loading" class="inspector-loading" role="status" aria-live="polite" aria-busy="false" hidden>
+              <span class="loading-orbit" aria-hidden="true"></span>正在加载 Trace 详情
+            </div>
+            <div id="trace-run-summary" class="trace-run-summary" hidden></div>
+            <div id="trace-event-list" class="trace-event-list"></div>
+          </div>
+        </section>
+      </aside>
     </div>
 
     <dialog id="session-dialog" class="app-dialog" aria-labelledby="session-dialog-title">
@@ -208,6 +320,23 @@
         <div class="dialog-actions">
           <button class="secondary-button dialog-cancel-button" type="button">取消</button>
           <button id="confirm-clear-button" class="danger-button" type="submit">确认清空</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-trace-dialog" class="app-dialog danger-dialog" aria-labelledby="delete-trace-dialog-title">
+      <form id="delete-trace-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">TRACE ONLY</p>
+            <h2 id="delete-trace-dialog-title">删除这条 Trace？</h2>
+          </div>
+          <button class="icon-button dialog-close-button" type="button" aria-label="关闭 Trace 删除确认窗口">×</button>
+        </div>
+        <p>只删除选中的 Trace；聊天消息、Session 和 Todo 都会保留。</p>
+        <div class="dialog-actions">
+          <button class="secondary-button dialog-cancel-button" type="button">保留 Trace</button>
+          <button id="confirm-delete-trace-button" class="danger-button" type="submit">确认删除 Trace</button>
         </div>
       </form>
     </dialog>

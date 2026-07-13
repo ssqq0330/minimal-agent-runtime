@@ -6590,3 +6590,757 @@ python -m pytest -q
 8. 不执行 git commit。
 9. 不执行 git push。
 ````
+
+## Stage 09B：Todo、Trace 时间线与运行 Inspector
+
+````text
+当前项目已经完成并提交：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制与 calculator、search、todo
+stage-03：真实 LLM Client、JSON 解析器和 Prompt
+stage-04：自研 Agent Runtime Loop
+stage-05：SQLite Session、消息、Todo 持久化
+stage-06：Context 管理和基础压缩
+stage-07：Agent Trace 持久化
+stage-08：FastAPI Session、Chat、Todo 和 Trace API
+stage-09a：原生 HTML/CSS/JavaScript 多 Session 聊天界面
+
+现在完成第九阶段第二部分：Todo 面板、Trace 时间线、运行指标和界面完善。
+
+本阶段不修改 Agent Runtime、工具 Schema、SQLite 核心存储协议和 LLM Client。
+
+禁止使用：
+
+- React
+- Vue
+- Angular
+- Svelte
+- jQuery
+- Bootstrap
+- Tailwind CDN
+- npm 构建工具
+- 外部前端 CDN
+
+继续使用原生 HTML、CSS 和 JavaScript ES Modules。
+
+一、总体目标
+
+在现有三栏聊天布局基础上，增加右侧 Inspector 面板。
+
+最终桌面布局：
+
+┌──────────────┬──────────────────────────┬─────────────────────┐
+│ Session 列表 │ 聊天主区域               │ Inspector           │
+│              │                          │ 概览 / Todo / Trace │
+└──────────────┴──────────────────────────┴─────────────────────┘
+
+Inspector 至少包含三个标签：
+
+1. 概览
+2. Todo
+3. Trace
+
+窄屏时：
+
+- Inspector 可以折叠
+- 或显示在聊天区域下方
+- 不允许严重横向溢出
+- Session 侧边栏和 Inspector 都能独立开关
+
+二、主要修改文件
+
+修改：
+
+web/index.html
+web/styles.css
+web/app.js
+web/api.js
+web/state.js
+
+可以新增：
+
+web/render.js
+web/inspector.js
+
+新增测试：
+
+tests/test_web_inspector.py
+
+更新：
+
+docs/WEB_UI_CHECKLIST.md
+README.md
+docs/AI_PROMPTS.md
+docs/PROBLEM_SOLVING.md
+
+三、Inspector HTML 结构
+
+在 index.html 中增加：
+
+- inspector-panel
+- toggle-inspector-button
+- inspector-tabs
+- overview-tab-button
+- todo-tab-button
+- trace-tab-button
+- overview-panel
+- todo-panel
+- trace-panel
+
+概览区域至少包含：
+
+- current-run-id
+- metric-llm-calls
+- metric-tool-calls
+- metric-context-compressed
+- metric-loaded-history
+- metric-run-status
+- metric-run-duration
+
+Todo 区域至少包含：
+
+- todo-list
+- todo-empty-state
+- refresh-todos-button
+- todo-loading
+
+Trace 区域至少包含：
+
+- trace-run-list
+- trace-empty-state
+- refresh-traces-button
+- trace-loading
+- trace-detail
+- trace-event-list
+- delete-trace-button
+
+要求：
+
+1. 标签使用 button。
+2. 使用 aria-selected。
+3. 标签面板使用 role="tabpanel"。
+4. 当前标签有明显高亮。
+5. 所有按钮有可访问名称。
+6. 动态内容不得直接拼接进 innerHTML。
+7. 不引入外部图标库。
+8. 可以使用简单 Unicode 符号或纯文字。
+
+四、API 封装
+
+在 web/api.js 中增加：
+
+async function listTodos(userId, sessionId)
+
+调用：
+
+GET /api/sessions/{session_id}/todos?user_id=...
+
+增加：
+
+async function listTraceRuns(
+    userId,
+    {
+        sessionId = null,
+        status = null,
+        limit = 50
+    } = {}
+)
+
+调用：
+
+GET /api/traces?user_id=...&session_id=...&status=...&limit=...
+
+增加：
+
+async function getTrace(userId, runId)
+
+调用：
+
+GET /api/traces/{run_id}?user_id=...
+
+增加：
+
+async function deleteTrace(userId, runId)
+
+调用：
+
+DELETE /api/traces/{run_id}?user_id=...
+
+要求：
+
+1. 所有 URL 参数使用 URLSearchParams。
+2. session_id 和 run_id 使用 encodeURIComponent。
+3. 204 响应正确处理。
+4. 继续使用统一 ApiError。
+5. 不在错误中展示原始响应和堆栈。
+6. 不写死 localhost。
+7. 不存储 API Key。
+8. 导出新增函数。
+
+五、前端状态
+
+在 state.js 中增加：
+
+- inspectorOpen
+- activeInspectorTab
+- todos
+- traceRuns
+- selectedRunId
+- traceDetail
+- isLoadingTodos
+- isLoadingTraceRuns
+- isLoadingTraceDetail
+- isDeletingTrace
+
+localStorage 只允许新增：
+
+minimal-agent.inspector-open
+minimal-agent.inspector-tab
+
+不能把以下内容写入 localStorage：
+
+- Todo 数据
+- Trace 数据
+- 消息内容
+- run_id 历史列表
+- 工具结果
+- API 响应
+- 密钥
+
+切换用户或 Session 时必须清空：
+
+- todos
+- traceRuns
+- selectedRunId
+- traceDetail
+
+六、概览面板
+
+概览面板展示当前 Session 最近一次 Agent 运行的信息。
+
+优先使用：
+
+1. 当前 ChatResponse 返回的数据
+2. 当前 assistant 消息 metadata
+3. lastRunId 对应 Trace
+
+至少展示：
+
+- Run ID 短形式
+- LLM 调用次数
+- 工具调用次数
+- 是否发生 Context 压缩
+- 加载历史消息数
+- Run 状态
+- 运行耗时
+
+运行耗时根据：
+
+finished_at - started_at
+
+由前端计算。
+
+没有运行记录时显示：
+
+尚无 Agent 运行记录
+
+要求：
+
+1. Run ID 可以复制。
+2. 不展示 API Key。
+3. 不展示 system Prompt。
+4. 不展示完整 Runtime messages。
+5. 不展示完整 reasoning_summary。
+6. 值缺失时显示“—”，不能报错。
+7. Context compressed 显示“是/否”。
+
+七、Todo 面板
+
+选中 Session 后自动调用 listTodos。
+
+每条 Todo 展示：
+
+- id
+- content
+- completed 状态
+- created_at
+- completed_at，可选
+
+当前后端只有查询接口时，本阶段前端只实现查看和刷新，不伪造完成、删除功能。
+
+要求：
+
+1. 按后端顺序展示。
+2. completed=true 显示已完成样式。
+3. completed=false 显示未完成样式。
+4. 内容使用 textContent。
+5. 空列表显示：
+   当前 Session 暂无待办
+6. 加载失败显示 Toast。
+7. 切换 Session 时清空旧 Todo。
+8. Chat 成功后自动刷新 Todo。
+9. 刷新按钮防重复点击。
+10. Todo 数据不能串到其他 Session。
+11. 用户切换后旧 Todo 立即清空。
+12. created_at 使用 formatDateTime。
+
+八、Trace Run 列表
+
+选中 Session 后调用：
+
+listTraceRuns(
+    userId,
+    {
+        sessionId: activeSessionId,
+        limit: 50
+    }
+)
+
+每条 Run 展示：
+
+- run_id 短形式
+- status
+- started_at
+- total_llm_calls
+- total_tool_calls
+- user_input 的安全截断预览
+
+状态显示：
+
+- completed
+- failed
+- running
+
+要求：
+
+1. 最新运行在前。
+2. status 使用不同徽章。
+3. 点击 Run 加载详情。
+4. lastRunId 存在时优先选中。
+5. Chat 成功后自动刷新 Trace，并选中新 run_id。
+6. Session 切换时清空旧 Trace。
+7. 用户切换时清空旧 Trace。
+8. 不显示其他 Session Trace。
+9. 不显示其他用户 Trace。
+10. 用户输入预览最长约 80 字符。
+11. 所有动态文本用 textContent。
+
+九、Trace 详情
+
+调用：
+
+getTrace(userId, runId)
+
+展示：
+
+Run 信息：
+
+- run_id
+- status
+- started_at
+- finished_at
+- total_llm_calls
+- total_tool_calls
+- final_answer
+- error_type
+- error_message
+
+事件按 sequence 升序展示时间线。
+
+支持事件类型：
+
+- run_started
+- context_built
+- llm_decision
+- tool_call
+- tool_result
+- run_completed
+- run_failed
+
+每个事件展示：
+
+- sequence
+- event_type
+- step_number
+- created_at
+- 关键 payload
+
+具体展示规则：
+
+context_built：
+
+- compressed
+- original_message_count
+- output_message_count
+- summarized_message_count
+- retained_recent_count
+- original_char_count
+- output_char_count
+
+llm_decision：
+
+- decision_type
+- reasoning_summary
+- model
+
+tool_call：
+
+- tool_call_id
+- tool_name
+- arguments
+
+tool_result：
+
+- tool_call_id
+- tool_name
+- success
+- output
+- error
+
+run_completed：
+
+- stopped_reason
+- total_llm_calls
+- total_tool_calls
+
+run_failed：
+
+- error_type
+- error_message
+
+要求：
+
+1. arguments 和 output 使用 JSON.stringify(value, null, 2)。
+2. 放入 pre 元素时通过 textContent 设置。
+3. 禁止用 innerHTML 渲染 JSON。
+4. 长 JSON 区域可以折叠。
+5. tool_call 与 tool_result 有明显视觉关联。
+6. success=true/false 使用不同状态。
+7. 不渲染未知 HTML。
+8. 未知事件使用通用 JSON 展示。
+9. 详情加载失败不能清空整个聊天页面。
+10. Trace 中若出现 "[REDACTED]" 应原样显示。
+11. 不恢复或推测已被后端过滤的敏感值。
+12. reasoning_summary 只显示 Trace 中已有的简短摘要。
+
+十、删除 Trace
+
+点击 delete-trace-button：
+
+1. 没有选中 Run 时禁用。
+2. 使用确认对话。
+3. 只删除 Trace，不删除消息、Session 和 Todo。
+4. 调用 deleteTrace。
+5. 成功后刷新 Run 列表。
+6. 清空 traceDetail。
+7. 显示成功提示。
+8. 用户 A 不能删除用户 B 的 Trace。
+9. 删除期间禁用按钮。
+10. 错误使用统一 Toast。
+
+十一、Chat 与 Inspector 联动
+
+Chat 请求成功后：
+
+1. 更新 lastRunId。
+2. 刷新 Session 列表。
+3. 刷新 Todo。
+4. 刷新 Trace Run 列表。
+5. 自动选中本次 run_id。
+6. 加载本次 Trace 详情。
+7. 更新概览指标。
+8. 不阻塞 assistant 消息优先显示。
+
+如果 Inspector 相关刷新失败：
+
+- Chat 成功结果仍然保留
+- 显示轻量错误提示
+- 不把成功 Chat 标记成失败
+
+十二、安全的轻量 Markdown 显示
+
+当前模型可能返回：
+
+**晴朗**
+
+页面会原样显示星号。
+
+实现一个安全的轻量格式化函数，例如：
+
+renderSafeMessage(container, text)
+
+只支持：
+
+1. 换行
+2. **加粗**
+3. `行内代码`
+4. 以 "- " 开头的简单无序列表
+
+安全要求：
+
+1. 禁止使用 innerHTML 插入模型内容。
+2. 使用 document.createElement 和 document.createTextNode。
+3. 不支持原始 HTML。
+4. `<script>` 必须作为普通文本显示。
+5. `<img onerror=...>` 必须作为普通文本显示。
+6. Markdown 语法损坏时回退成普通文本。
+7. 不支持链接，不自动生成可点击 URL。
+8. 不支持 iframe、style、HTML 标签。
+9. 用户消息和 assistant 消息都可以使用同一安全渲染器。
+10. 测试中确认没有 eval 和危险 innerHTML。
+
+十三、顶部布局修复
+
+当前截图中“应用”按钮在部分宽度下发生文字换行。
+
+要求：
+
+1. apply-user-button 使用 white-space: nowrap。
+2. 设置合理 min-width。
+3. 用户区域允许弹性收缩。
+4. 小屏时用户区域换到下一行，而不是压缩按钮文字。
+5. 服务状态徽章不能覆盖输入框。
+6. 标题区域不能溢出。
+7. 1024px、768px 和移动端宽度下保持可用。
+
+十四、响应式布局
+
+桌面端：
+
+- Session：约 260～320px
+- Inspector：约 320～420px
+- 聊天主区域自适应
+
+中等屏幕：
+
+- Inspector 默认折叠
+- 可通过 toggle-inspector-button 打开覆盖层或下方区域
+
+移动端：
+
+- Session 侧边栏为抽屉
+- Inspector 为抽屉或底部面板
+- 聊天输入区始终可见
+- 不出现横向页面滚动
+- Trace JSON 区域自身横向滚动
+
+使用：
+
+@media (max-width: ...)
+
+并支持：
+
+prefers-reduced-motion
+
+十五、加载状态与空状态
+
+Todo：
+
+- 加载中
+- 空列表
+- 加载失败
+
+Trace：
+
+- 加载 Run 列表
+- 无 Run
+- 加载详情
+- 无选中 Run
+- Run 不存在
+
+概览：
+
+- 尚无运行数据
+
+要求：
+
+1. 不用伪造数据填充。
+2. Loading 完成后正确隐藏。
+3. 多次快速切换 Session 时，旧请求响应不能覆盖新 Session。
+4. 使用 requestUserId/requestSessionId 或 AbortController。
+5. Trace 详情也要检查 selectedRunId 是否仍然匹配。
+
+十六、键盘与可访问性
+
+1. Inspector 标签可使用键盘切换。
+2. Tab 键顺序合理。
+3. Escape 可关闭抽屉。
+4. focus-visible 样式明显。
+5. 状态变化可使用 aria-live。
+6. Toast 使用适当 aria-live。
+7. loading 使用 aria-busy。
+8. 删除按钮有明确危险提示。
+9. Run 列表项可通过 Enter 打开。
+
+十七、测试
+
+新增：
+
+tests/test_web_inspector.py
+
+因为不增加浏览器自动化依赖，使用 pytest 检查 HTML、CSS、JS 静态资源和 API 集成关键字符串。
+
+至少覆盖：
+
+HTML：
+
+1. 存在 inspector-panel。
+2. 存在 toggle-inspector-button。
+3. 存在三个标签按钮。
+4. 存在 overview-panel。
+5. 存在 todo-panel。
+6. 存在 trace-panel。
+7. 存在 todo-list。
+8. 存在 trace-run-list。
+9. 存在 trace-event-list。
+10. 存在 delete-trace-button。
+11. 标签包含 aria-selected。
+12. 面板包含 role=tabpanel。
+
+API：
+
+13. api.js 包含 Todo 查询接口。
+14. api.js 包含 Trace 列表接口。
+15. api.js 包含 Trace 详情接口。
+16. api.js 包含 Trace 删除请求。
+17. 使用 URLSearchParams。
+18. 使用 encodeURIComponent。
+
+安全：
+
+19. JS 不使用 eval。
+20. JS 不使用 new Function。
+21. 模型内容不通过 innerHTML 渲染。
+22. Trace JSON 使用 textContent。
+23. 不包含真实 API Key。
+24. 不加载外部 CDN。
+25. 不把 Todo 写入 localStorage。
+26. 不把 Trace 写入 localStorage。
+27. 不把消息写入 localStorage。
+
+行为代码检查：
+
+28. Chat 成功后刷新 Todo。
+29. Chat 成功后刷新 Trace。
+30. Chat 成功后保存 lastRunId。
+31. Session 切换时清理 Inspector 状态。
+32. 用户切换时清理 Inspector 状态。
+33. 存在 Trace 响应归属检查。
+34. 存在 Todo 响应归属检查。
+35. 存在 formatDateTime。
+36. 存在安全消息渲染函数。
+37. 支持 **加粗**。
+38. 支持行内代码。
+39. 支持简单列表。
+40. 动态文本使用 createTextNode 或 textContent。
+
+CSS：
+
+41. Inspector 有桌面布局。
+42. Inspector 有中等屏幕规则。
+43. Inspector 有移动端规则。
+44. apply-user-button 不换行。
+45. Trace pre 支持 overflow。
+46. 包含 focus-visible。
+47. 包含 prefers-reduced-motion。
+48. 页面不产生明显横向溢出。
+
+兼容：
+
+49. test_web_ui.py 继续通过。
+50. API 测试继续通过。
+51. 全部原有测试继续通过。
+52. 测试不调用真实 LLM。
+
+十八、手动验收
+
+更新 docs/WEB_UI_CHECKLIST.md，增加：
+
+1. 打开 weather-window。
+2. 验证 Todo 面板出现“出门带伞”。
+3. 打开 report-window。
+4. 验证 Todo 面板只出现“周五前完成周报”。
+5. 验证两个窗口 Todo 不串线。
+6. 发起新 Chat。
+7. 验证 assistant 回答先出现。
+8. 验证 Trace 自动刷新。
+9. 打开最新 Trace。
+10. 验证 run_started 到 run_completed 的完整时间线。
+11. 验证 calculator/search/todo 参数和结果。
+12. 验证 Context 压缩指标。
+13. 删除 Trace。
+14. 验证消息和 Todo 不受影响。
+15. 验证 **加粗** 正常显示。
+16. 输入 `<script>alert(1)</script>`，确认不会执行。
+17. 调整浏览器到 1024px。
+18. 调整到移动端宽度。
+19. 验证 Session 和 Inspector 抽屉。
+20. 验证顶部“应用”不换行。
+21. 记录最终录屏步骤。
+
+十九、README
+
+更新 README：
+
+1. Web UI 现在包含：
+   - 多 Session 聊天
+   - Todo 查看
+   - Trace Run 列表
+   - Trace 事件时间线
+   - Context 指标
+2. 说明 Inspector 不进入 LLM Context。
+3. 说明 Trace 数据来自 SQLite。
+4. 说明安全轻量 Markdown 的支持范围。
+5. 说明用户 ID 不是正式鉴权。
+6. 增加页面使用说明。
+7. 增加录屏建议路径。
+
+二十、开发文档
+
+将完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+更新 docs/PROBLEM_SOLVING.md：
+
+1. 为什么 Inspector 与聊天状态分离。
+2. Chat 成功后如何异步刷新 Inspector。
+3. 如何避免旧 Trace 响应覆盖新 Session。
+4. 为什么 Todo 只从后端读取。
+5. 为什么不把 Trace 保存到 localStorage。
+6. 如何安全渲染简单 Markdown。
+7. 为什么禁止 innerHTML 渲染模型回答。
+8. Trace 事件如何映射到时间线。
+9. 如何计算运行耗时。
+10. 如何实现移动端 Inspector。
+
+二十一、限制
+
+1. 不修改 Agent Runtime。
+2. 不修改工具 Schema。
+3. 不实现正式用户登录。
+4. 不增加 npm。
+5. 不使用外部 CDN。
+6. 不增加浏览器测试框架。
+7. 不执行 git commit。
+8. 不执行 git push。
+
+二十二、完成后
+
+1. 运行：
+
+python -m pytest tests/test_web_ui.py tests/test_web_inspector.py -q
+
+2. 运行完整测试：
+
+python -m pytest -q
+
+3. 修复全部失败。
+4. 启动 FastAPI。
+5. 手动验证 Todo 和 Trace 面板。
+6. 检查移动端布局。
+7. 列出创建和修改文件。
+8. 不执行 git commit。
+9. 不执行 git push。
+````

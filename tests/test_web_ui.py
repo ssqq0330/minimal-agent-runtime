@@ -111,6 +111,8 @@ def test_local_storage_is_namespaced_and_preferences_only() -> None:
         "minimal-agent.user-id",
         "minimal-agent.active-session-id",
         "minimal-agent.sidebar-collapsed",
+        "minimal-agent.inspector-open",
+        "minimal-agent.inspector-tab",
     }
     assert "localStorage.setItem" in state_source
     assert re.search(r"localStorage\.setItem\([^\n]*(message|trace|todo)", state_source, re.I) is None

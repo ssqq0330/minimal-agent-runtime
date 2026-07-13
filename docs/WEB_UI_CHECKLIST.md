@@ -39,3 +39,29 @@
 3. 快速切换两个 Session，展示消息隔离与助手消息下方的 Agent 统计。
 4. 刷新页面，展示选中项和历史恢复。
 5. 展示重命名、移动端侧栏收起，最后展示删除确认中的级联说明。
+
+## Inspector、Todo 与 Trace
+
+1. 打开 `weather-window`，切换到 Todo 标签，确认只出现“出门带伞”。
+2. 打开 `report-window`，确认 Todo 立即清空再加载，最终只出现“周五前完成周报”。
+3. 来回切换两个 Session，确认 Todo、Trace Run 和 Trace 详情都不串线。
+4. 发起一次新 Chat，确认 assistant 回答先出现，Inspector 随后自动刷新。
+5. 确认概览显示 Run ID、LLM/工具次数、Context 压缩、历史数量、状态和耗时。
+6. 打开最新 Trace，确认事件按 sequence 从 `run_started` 到 `run_completed` 排列。
+7. 展开 calculator、search 或 todo 的 arguments/output，确认 JSON 可读且工具调用与结果容易对应。
+8. 检查 `context_built` 的消息数量、字符数量与压缩指标。
+9. 删除选中 Trace，确认消息、Session 和 Todo 保持不变。
+10. 发送包含 `**加粗**`、`` `行内代码` `` 和 `- 列表项` 的消息，确认轻量格式正常。
+11. 输入 `<script>alert(1)</script>` 和 `<img src=x onerror=alert(1)>`，确认只显示文本且没有执行。
+12. 将浏览器调到 1024px，确认 Inspector 默认可折叠、打开时作为右侧覆盖层。
+13. 调到 768px 和移动端宽度，分别打开 Session 与 Inspector 抽屉，确认两者可独立关闭。
+14. 确认聊天输入区始终可见、页面无横向滚动、Trace JSON 仅在自身区域横向滚动。
+15. 检查顶部“应用”按钮始终单行，服务徽章不覆盖用户输入框。
+
+## Inspector 录屏路径
+
+1. 先展示双 Session Todo 隔离。
+2. 发起 search + todo 请求，先停留在 assistant 回答，再打开自动选中的最新 Trace。
+3. 展开 tool_call 与 tool_result JSON，展示完整事件时间线和概览指标。
+4. 删除 Trace 后切回聊天与 Todo，证明业务数据不受影响。
+5. 最后缩窄页面，展示 Session 和 Inspector 两个独立抽屉。

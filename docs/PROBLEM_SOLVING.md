@@ -395,3 +395,16 @@
 - 为什么 Chat 前必须选择 Session：后端明确拒绝隐式创建，且所有历史、Todo 和 Trace 都以 `user_id + session_id` 为隔离边界。显式选中可避免拼写错误产生意外数据归属。
 - 如何展示 Agent 加载状态：发送期间禁用重复提交和删除操作，同时显示“Agent 正在思考和调用工具”；历史加载使用独立骨架。成功消息仅展示紧凑的 LLM、工具和 Context 压缩统计，不展示推理正文。
 - 9B 如何增加 Trace 和 Todo 面板：可复用当前 active Session 与 `lastRunId`，按需请求 Trace/Todo API，在聊天主区域旁增加惰性面板；现有 API、状态与 ownership 快照边界无需修改 Agent Runtime。
+
+## 2026-07-13: Stage 09B — Todo、Trace 与运行 Inspector
+
+- 为什么 Inspector 与聊天状态分离：聊天的首要职责是及时呈现用户和助手消息；Inspector 是可恢复的诊断视图。独立模块让 Todo/Trace 请求失败时不会回滚或误标已经成功的 Chat。
+- Chat 成功后的异步刷新：ChatResponse 先替换乐观消息并更新概览，然后以不等待的方式并行刷新 Todo 和 Trace。Trace 列表优先选择本次 `run_id` 并继续加载详情。
+- 避免旧 Trace 覆盖新 Session：Todo、Trace 列表和 Trace 详情各有请求版本号，并捕获 `requestUserId`、`requestSessionId`；详情还校验 `selectedRunId` 与响应中的用户、Session、Run 三个字段。
+- 为什么 Todo 只从后端读取：当前 HTTP API 只提供查询。前端不伪造完成、删除或本地写入，SQLite 始终是 Session Todo 的唯一事实来源。
+- 为什么 Trace 不进 localStorage：Trace 可能包含对话派生数据和工具结果。浏览器只保留 Inspector 的开关与标签偏好，真实 Trace 每次都按当前用户和 Session 从后端重新查询。
+- 安全轻量 Markdown：渲染器逐行创建 DOM 节点，只识别换行、双星号加粗、反引号行内代码和 `- ` 列表。损坏语法与所有 HTML 标签都作为普通文本保留。
+- 为什么禁止 innerHTML：模型回答、Todo、Trace payload 都是不可信动态内容。使用 `createTextNode` 和 `textContent` 可以从结构上阻止脚本、事件属性、iframe 或 style 被浏览器解释。
+- Trace 时间线映射：每个后端事件变成带 sequence 标记的卡片；Context 和决策展示白名单字段，工具参数与结果放在可折叠 `pre` 中，未知事件以通用 JSON 安全展示。
+- 运行耗时：只有合法的 `started_at` 与 `finished_at` 都存在且结束时间不早于开始时间时才在浏览器计算差值；缺失或非法值统一显示“—”。
+- 移动端 Inspector：桌面使用第三列；中等和移动宽度使用固定右侧抽屉。Session 与 Inspector 分别由独立 body 状态控制，Escape 只关闭当前打开的 Inspector 抽屉。

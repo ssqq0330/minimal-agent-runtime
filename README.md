@@ -42,7 +42,7 @@ http://127.0.0.1:8000/api/health.
 ## Web UI
 
 The FastAPI service now serves a native HTML, CSS, and JavaScript multi-Session
-chat interface at http://127.0.0.1:8000/. Start it with:
+chat and Inspector interface at http://127.0.0.1:8000/. Start it with:
 
 ```bash
 python -m uvicorn app.main:app --reload
@@ -56,15 +56,30 @@ The main flow is:
    needed.
 4. Switch between Sessions to verify that their persisted histories stay
    isolated, then rename, clear, or delete them as needed.
+5. Use the right-side Inspector to review Context metrics, Session-scoped Todos,
+   Trace Run history, and each ordered Trace event.
 
 The user ID is only an isolation identifier for this local demonstration. It is
 not login or authentication. The browser never stores an API key, messages,
 Todos, or Trace data. `localStorage` contains only the selected user ID, active
-Session ID, and collapsed-sidebar preference; conversation history always comes
-from the backend.
+Session ID, sidebar preference, and Inspector open/tab preferences;
+conversation and Inspector data always come from the backend.
 
-Stage 9B will add the complete Trace timeline and Todo management panels. This
-stage shows only compact LLM/tool/Context statistics beneath assistant messages.
+Inspector data is read from the same SQLite persistence layer but is never sent
+back into the LLM Context. The Todo tab is intentionally read-only because the
+current HTTP API only exposes Todo queries. The Trace tab lists Runs newest
+first, shows the sanitized event timeline, and can delete a Trace without
+deleting its Session, messages, or Todos.
+
+Chat messages support a deliberately small, safe Markdown subset: newlines,
+`**bold**`, inline backtick code, and lines beginning with `- `. Links and raw
+HTML are not interpreted; content is constructed with DOM text nodes rather
+than inserted as HTML.
+
+For a concise recording, create weather and report Sessions, send one tool task
+in each, switch between their Todo lists, open the newest Trace from
+`run_started` through `run_completed`, then demonstrate the collapsible
+Inspector at desktop and mobile widths.
 
 ## LLM configuration
 

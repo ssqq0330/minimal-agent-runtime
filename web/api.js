@@ -68,6 +68,10 @@ function sessionPath(sessionId, suffix = "") {
   return `/api/sessions/${encodeURIComponent(sessionId)}${suffix}`;
 }
 
+function tracePath(runId = "") {
+  return runId ? `/api/traces/${encodeURIComponent(runId)}` : "/api/traces";
+}
+
 export function healthCheck() {
   return apiRequest("/api/health");
 }
@@ -117,5 +121,35 @@ export function sendChat(payload) {
   return apiRequest("/api/chat", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function listTodos(userId, sessionId) {
+  return apiRequest(
+    `${sessionPath(sessionId, "/todos")}?${query({ user_id: userId })}`,
+  );
+}
+
+export function listTraceRuns(
+  userId,
+  { sessionId = null, status = null, limit = 50 } = {},
+) {
+  const parameters = { user_id: userId, limit: String(limit) };
+  if (sessionId) {
+    parameters.session_id = sessionId;
+  }
+  if (status) {
+    parameters.status = status;
+  }
+  return apiRequest(`${tracePath()}?${query(parameters)}`);
+}
+
+export function getTrace(userId, runId) {
+  return apiRequest(`${tracePath(runId)}?${query({ user_id: userId })}`);
+}
+
+export function deleteTrace(userId, runId) {
+  return apiRequest(`${tracePath(runId)}?${query({ user_id: userId })}`, {
+    method: "DELETE",
   });
 }
