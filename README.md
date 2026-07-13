@@ -290,6 +290,69 @@ python -m scripts.trace_demo
 The script uses only `data/trace-demo.db`, prints the completed run and ordered
 events, and verifies that real calculator and Todo results were recorded.
 
+## FastAPI backend
+
+Start the complete HTTP service with:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+The application lifespan creates and owns the production service graph. If LLM
+configuration is missing, import and startup still succeed: `/api/health`, the
+static page, and database-backed Session/Message/Todo/Trace endpoints remain
+available, while `/api/chat` returns `503 llm_unavailable` without attempting a
+network request.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/sessions` | Create a Session |
+| GET | `/api/sessions?user_id=...` | List one user's Sessions |
+| GET/PATCH/DELETE | `/api/sessions/{session_id}` | Read, rename, or delete a Session |
+| GET/DELETE | `/api/sessions/{session_id}/messages` | Read or clear history |
+| GET | `/api/sessions/{session_id}/todos` | List Session-scoped Todos |
+| POST | `/api/chat` | Run one persisted Agent turn |
+| GET | `/api/traces` | List user-scoped Trace runs |
+| GET/DELETE | `/api/traces/{run_id}` | Read or delete one owned Trace |
+| GET | `/api/health` | Check service, LLM configuration, and database state |
+
+A Session must exist before Chat; Chat never creates one implicitly. Every
+operation carries both `user_id` and `session_id`, so identical Session ids for
+different users and separate windows for one user remain isolated. A successful
+Chat response includes compact Agent/Context statistics and `run_id`, but not
+Runtime messages, the system Prompt, raw HTTP data, or hidden reasoning.
+
+Create a Session and chat with curl:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user-a","session_id":"window-1","title":"天气窗口"}'
+
+curl -X POST http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id":"user-a","session_id":"window-1","message":"查询东京天气"}'
+
+curl 'http://127.0.0.1:8000/api/traces?user_id=user-a&session_id=window-1'
+curl 'http://127.0.0.1:8000/api/traces/RUN_ID?user_id=user-a'
+```
+
+Errors consistently use this safe shape:
+
+```json
+{"error":{"code":"session_not_found","message":"Session 不存在"}}
+```
+
+LLM request or response failures use HTTP 502, missing configuration uses 503,
+and the Runtime step-limit uses HTTP 508. Error bodies never echo credentials,
+headers, traceback text, system prompts, or raw provider responses.
+
+With the server running, exercise two isolated windows through HTTP:
+
+```bash
+python -m scripts.api_demo
+```
+
 ## Current architecture
 
 ```text
@@ -314,5 +377,4 @@ AgentDecision(final/tool_call)
      Return result to LLM and continue
 ```
 
-HTTP Chat/Trace routes, the multi-window web UI, and long-term user memory
-remain future milestones.
+The multi-window web UI and long-term user memory remain future milestones.

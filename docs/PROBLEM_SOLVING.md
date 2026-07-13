@@ -341,3 +341,44 @@
 - Future web presentation: `SessionChatResult` returns only `run_id`. A later
   authenticated Trace route can enforce user ownership, call `get_trace`, and
   render the sequence as a timeline without bloating every chat response.
+
+## 2026-07-13: Stage 08 — FastAPI 后端接口
+
+- Why `ApplicationServices`: The API needs one explicit composition root for
+  Store, LLM client, tools, Runtime, Context, Trace, and Session orchestration.
+  A small container makes ownership visible and lets tests inject a complete
+  offline graph without patching globals.
+- Why LLM initialization cannot happen at import: Importing `app.main` is used
+  by Uvicorn, tests, documentation tools, and health checks. Reading `.env` or
+  creating an HTTP client there would make all those operations depend on
+  secrets and could fail before FastAPI can serve a useful error.
+- Lifespan resource management: Startup creates configured services, or a
+  database-only degraded graph when LLM configuration is absent. Shutdown calls
+  `close()`; only internally owned clients are closed, so injected test clients
+  remain caller-owned.
+- Fake LLM injection: API tests construct real Store, registry, Runtime,
+  Context, Trace, and Session services around a deterministic Fake client, then
+  pass that `ApplicationServices` to `create_app`. No test reads `.env` or uses
+  the network.
+- Why Chat does not create Sessions: Explicit creation makes titles, ownership,
+  window selection, and 404 behavior deterministic. It also prevents typos or
+  stale browser state from silently creating new persistence scopes.
+- Exception-to-HTTP mapping: Domain exceptions retain their Python behavior in
+  lower layers, while FastAPI handlers map missing resources, invalid inputs,
+  LLM failures, parse failures, step limits, and persistence failures to stable
+  status/code pairs. The chosen step-limit status is HTTP 508.
+- Safe error responses: Handlers return fixed, concise messages instead of
+  exception text. This prevents API keys, Authorization headers, provider
+  response bodies, system prompts, and traceback details from crossing the HTTP
+  boundary.
+- Why Trace details are separate: Chat returns only `run_id` and compact counts.
+  Clients fetch the potentially larger ordered event list on demand, with an
+  explicit `user_id` ownership check before disclosure or deletion.
+- Why Chat omits Runtime messages: Those messages contain the system Prompt,
+  tool-result protocol records, and raw structured model decisions. The API
+  needs only the final answer, persisted messages, run id, and operational
+  counts for normal UI rendering.
+- Future web client: A multi-window page can create/list Sessions, load their
+  messages and Todos, post Chat turns, then use returned `run_id` to open a
+  lazy Trace timeline. The same composite user/Session identifiers preserve
+  isolation across every endpoint.

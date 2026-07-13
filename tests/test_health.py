@@ -12,7 +12,7 @@ def test_health_check() -> None:
     response = client.get("/api/health")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "service": "minimal-agent-runtime",
-    }
+    assert response.json()["status"] == "ok"
+    assert response.json()["service"] == "minimal-agent-runtime"
+    assert response.json()["llm_configured"] is False
+    assert response.json()["database"] == "unavailable"

@@ -5258,3 +5258,655 @@ python -m pytest -q
 6. 说明一次 Trace 的事件顺序。
 7. 不执行 git commit 或 git push。
 ```
+
+## 2026-07-13: Stage 08 — Complete FastAPI backend
+
+Full prompt:
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、JSON 解析器和 Prompt
+stage-04：自研 Agent Runtime Loop
+stage-05：SQLite Session、消息和 Todo 持久化，多窗口续聊
+stage-06：Context 管理和基础压缩
+stage-07：Agent Trace 与执行日志持久化
+
+当前完整测试为 433 passed。
+
+现在开始第八阶段：实现完整 FastAPI 后端接口。
+
+本阶段只实现 HTTP API 和测试，不实现最终网页聊天界面。
+
+禁止使用 LangChain、LangGraph、OpenAI Agents SDK、OpenHands、OpenClaw 等 Agent 框架。
+
+项目使用 Python 3.11，并保持 Python 3.10 兼容。
+
+一、目标接口
+
+实现：
+
+1. Session 创建、列表、查看、重命名、删除
+2. Session 消息历史查询与清空
+3. Agent Chat 接口
+4. Trace 列表和详情查询
+5. Todo 查询接口
+6. 基础错误映射
+7. 可测试的依赖注入
+8. 保持原有健康检查和静态网页访问正常
+
+二、应用架构
+
+避免在模块 import 时直接读取真实 LLM 环境变量或创建网络客户端。
+
+建议新增：
+
+app/dependencies.py
+
+实现 ApplicationServices 数据类或普通类，包含：
+
+- store: SQLiteStore
+- llm_client: OpenAICompatibleLLMClient
+- tool_registry: ToolRegistry
+- runtime: AgentRuntime
+- context_manager: BasicContextManager
+- trace_recorder: SQLiteTraceRecorder
+- session_service: SessionAgentService
+
+实现：
+
+create_application_services(
+    db_path: str | Path = "data/agent.db"
+) -> ApplicationServices
+
+要求：
+
+1. 从 .env 加载 LLMConfig。
+2. 创建 SQLiteStore。
+3. create_default_registry(todo_store=store)。
+4. 创建 AgentRuntime。
+5. 创建 BasicContextManager。
+6. 创建 SQLiteTraceRecorder。
+7. 创建 SessionAgentService。
+8. 提供 close()，关闭内部 LLM Client。
+9. 不在模块 import 时执行。
+10. 测试可以直接注入 Fake ApplicationServices。
+
+三、FastAPI 应用生命周期
+
+修改 app/main.py。
+
+要求：
+
+1. 使用 FastAPI lifespan 管理真实 ApplicationServices。
+2. 启动时创建服务。
+3. 关闭时调用 services.close()。
+4. 将 services 放到 app.state.services。
+5. 如果 LLM 配置缺失：
+   - 健康检查和静态网页仍能启动
+   - Session 只读或数据库接口仍可使用
+   - Chat 接口返回明确的 503
+6. 不允许因为缺少 .env 导致 import app.main 失败。
+7. 测试可以通过：
+   - app.state.services
+   - dependency override
+   - create_app(...)
+   注入假服务。
+
+建议提供：
+
+create_app(
+    services: ApplicationServices | None = None,
+    db_path: str | Path = "data/agent.db"
+) -> FastAPI
+
+模块级：
+
+app = create_app()
+
+四、Pydantic 请求与响应 Schema
+
+更新 app/models/schemas.py。
+
+实现至少以下模型。
+
+1. CreateSessionRequest
+
+- user_id: str
+- session_id: str | None = None
+- title: str = "新会话"
+
+2. UpdateSessionRequest
+
+- user_id: str
+- title: str
+
+3. ChatRequest
+
+- user_id: str
+- session_id: str
+- message: str
+
+4. SessionResponse
+
+包含：
+
+- user_id
+- session_id
+- title
+- created_at
+- updated_at
+
+5. MessageResponse
+
+包含：
+
+- id
+- role
+- content
+- created_at
+- metadata
+
+6. ChatResponse
+
+至少包含：
+
+- session
+- user_message
+- assistant_message
+- answer
+- run_id
+- loaded_history_count
+- context
+- agent
+
+其中 agent 至少包含：
+
+- total_llm_calls
+- total_tool_calls
+- stopped_reason
+
+不要在 ChatResponse 中返回：
+
+- API Key
+- system Prompt
+- 原始 HTTP 响应
+- 完整 Runtime messages
+- 完整隐藏思维链
+
+7. TraceRunResponse
+8. TraceEventResponse
+9. TraceDetailResponse
+10. TodoResponse
+
+所有输入字段需要清晰校验：
+
+- user_id 非空
+- session_id 非空
+- title 非空
+- message 非空
+- limit 范围正确
+
+五、Session API
+
+修改 app/api/sessions.py。
+
+路由前缀：
+
+/api/sessions
+
+1. POST /api/sessions
+
+请求：
+
+{
+  "user_id": "user-a",
+  "session_id": "window-1",
+  "title": "天气窗口"
+}
+
+返回：
+
+201 Created
+
+SessionResponse。
+
+重复 Session：
+
+409 Conflict。
+
+2. GET /api/sessions?user_id=user-a
+
+返回当前用户 Session 列表。
+
+只允许读取指定 user_id 的 Session。
+
+3. GET /api/sessions/{session_id}?user_id=user-a
+
+Session 存在返回详情。
+
+不存在返回 404。
+
+必须同时匹配 user_id 和 session_id。
+
+4. PATCH /api/sessions/{session_id}
+
+请求：
+
+{
+  "user_id": "user-a",
+  "title": "新标题"
+}
+
+返回更新后的 Session。
+
+5. DELETE /api/sessions/{session_id}?user_id=user-a
+
+成功返回：
+
+204 No Content
+
+不存在返回 404。
+
+6. GET /api/sessions/{session_id}/messages?user_id=user-a&limit=50
+
+返回消息列表，旧到新。
+
+limit 可选，范围 1～500。
+
+7. DELETE /api/sessions/{session_id}/messages?user_id=user-a
+
+只清空消息，不删除 Session 和 Todo。
+
+返回：
+
+{
+  "deleted_count": 4
+}
+
+8. GET /api/sessions/{session_id}/todos?user_id=user-a
+
+返回当前 Session 的 Todo 列表。
+
+六、Chat API
+
+修改 app/api/chat.py。
+
+路由：
+
+POST /api/chat
+
+请求：
+
+{
+  "user_id": "user-a",
+  "session_id": "window-1",
+  "message": "请查询东京天气并记录带伞"
+}
+
+执行：
+
+SessionAgentService.chat(...)
+
+成功返回 ChatResponse。
+
+要求：
+
+1. Session 不存在返回 404。
+2. LLM 配置缺失返回 503。
+3. LLM 请求失败返回 502。
+4. LLM 响应格式错误返回 502。
+5. Agent 输出解析失败返回 502。
+6. 达到最大步骤返回 508 或 500，统一选择并在 README 说明。
+7. Context 压缩失败返回 500。
+8. 数据库错误返回 500。
+9. 错误响应使用统一结构：
+
+{
+  "error": {
+    "code": "session_not_found",
+    "message": "Session 不存在"
+  }
+}
+
+10. 错误中不能包含：
+    - API Key
+    - Authorization
+    - traceback 全文
+    - system Prompt
+    - 原始 HTTP 响应
+
+11. Chat 成功后返回 run_id。
+12. Chat 不允许自动创建 Session。
+13. 同一用户不同 Session 完全隔离。
+
+七、Trace API
+
+新增：
+
+app/api/traces.py
+
+路由前缀：
+
+/api/traces
+
+1. GET /api/traces
+
+参数：
+
+- user_id：必填
+- session_id：可选
+- status：可选，completed/failed/running
+- limit：默认 50，范围 1～200
+
+返回 Trace Run 列表，最新在前。
+
+2. GET /api/traces/{run_id}?user_id=user-a
+
+返回：
+
+{
+  "run": {...},
+  "events": [...]
+}
+
+事件按 sequence 升序。
+
+3. DELETE /api/traces/{run_id}?user_id=user-a
+
+成功：
+
+204
+
+不存在或不属于当前用户：
+
+404
+
+用户 A 不能读取或删除用户 B 的 Trace。
+
+八、健康检查
+
+保留：
+
+GET /api/health
+
+并增强返回，但保持原有字段兼容：
+
+{
+  "status": "ok",
+  "service": "minimal-agent-runtime",
+  "llm_configured": true,
+  "database": "available"
+}
+
+要求：
+
+1. 即使没有 LLM 配置，健康接口也可访问。
+2. llm_configured=false。
+3. 不返回模型 API Key。
+4. 不进行真实 LLM 网络请求。
+
+九、统一错误处理
+
+可以新增：
+
+app/api/errors.py
+
+实现统一异常映射。
+
+至少处理：
+
+- ValueError -> 422 或 400
+- DuplicateSessionError -> 409
+- SessionNotFoundError -> 404
+- TodoNotFoundError -> 404
+- AgentInputError -> 422
+- AgentLLMError -> 502
+- AgentDecisionError -> 502
+- AgentMaxStepsError -> 508 或 500
+- ContextCompressionError -> 500
+- TraceNotFoundError -> 404
+- TraceValidationError -> 422
+- MemoryStoreError -> 500
+- LLMConfigurationError -> 503
+
+要求：
+
+1. 返回统一 JSON。
+2. 不泄露敏感信息。
+3. 不返回 traceback。
+4. 未知编程异常不要全部转换成成功响应。
+5. 测试模式下仍方便定位错误。
+
+十、路由注册
+
+更新 app/main.py，注册：
+
+- sessions router
+- chat router
+- traces router
+
+保留：
+
+- /api/health
+- /
+- web 静态文件
+
+十一、CORS
+
+当前项目网页由同一个 FastAPI 服务提供，默认不需要开放任意来源。
+
+可以配置开发环境允许：
+
+- http://127.0.0.1:8000
+- http://localhost:8000
+
+不能默认使用：
+
+allow_origins=["*"]
+且同时 allow_credentials=True。
+
+保持安全简单。
+
+十二、API 测试
+
+新增：
+
+tests/test_sessions_api.py
+tests/test_chat_api.py
+tests/test_traces_api.py
+tests/test_app_lifecycle.py
+
+测试不得调用真实网络，也不得依赖真实 .env。
+
+使用：
+
+- tmp_path SQLite
+- FakeLLMClient
+- 真实 AgentRuntime
+- 真实 ToolRegistry
+- 真实 SessionAgentService
+- FastAPI TestClient
+
+至少覆盖：
+
+应用与健康检查：
+
+1. create_app 正常。
+2. 健康检查返回 200。
+3. 保留 status 和 service 字段。
+4. 无 LLM 配置时健康检查仍成功。
+5. llm_configured=false。
+6. 静态首页仍能打开。
+7. 应用关闭时关闭内部 LLM Client。
+8. 外部注入客户端的生命周期符合 ApplicationServices 设计。
+
+Session API：
+
+9. 创建 Session 返回 201。
+10. 自动生成 session_id。
+11. 指定 session_id。
+12. 重复创建返回 409。
+13. 列出当前用户 Session。
+14. 不返回其他用户 Session。
+15. 获取详情。
+16. 获取不存在 Session 返回 404。
+17. 修改标题。
+18. 删除 Session。
+19. 用户 A 不能删除用户 B 的同名 Session。
+20. 查询消息。
+21. 消息顺序正确。
+22. limit 正常。
+23. limit 非法返回 422。
+24. 清空消息。
+25. 清空消息不删除 Todo。
+26. 查询 Todo。
+27. Todo 按 Session 隔离。
+
+Chat API：
+
+28. 第一次纯对话成功。
+29. 返回 assistant answer。
+30. 返回 run_id。
+31. 返回 LLM 调用次数。
+32. 返回工具调用次数。
+33. Session 不存在返回 404。
+34. 空 message 返回 422。
+35. calculator 调用返回 60。
+36. search + todo 能执行。
+37. Todo 使用正确 user_id/session_id。
+38. 第二轮加载历史。
+39. loaded_history_count 正确。
+40. Context 压缩统计返回。
+41. 压缩摘要不作为数据库消息保存。
+42. window-1 和 window-2 历史隔离。
+43. 用户 A 与用户 B 隔离。
+44. AgentLLMError 返回 502。
+45. AgentDecisionError 返回 502。
+46. AgentMaxStepsError 返回约定状态码。
+47. 失败请求不保存本轮消息。
+48. 错误响应不包含 API Key。
+49. 错误响应符合统一结构。
+50. 缺少 LLM 配置返回 503。
+
+Trace API：
+
+51. Chat 后可以列出 Trace。
+52. Trace 列表按最新在前。
+53. session_id 过滤。
+54. status 过滤。
+55. 获取 Trace 详情。
+56. events 按 sequence 排序。
+57. Trace 中有 calculator 工具结果。
+58. Trace 中有 todo 工具结果。
+59. 用户 A 不能读取用户 B Trace。
+60. 删除 Trace。
+61. 用户 A 不能删除用户 B Trace。
+62. limit 非法返回 422。
+63. run_id 不存在返回 404。
+64. Trace 响应不包含 API Key。
+65. Trace 不包含完整 Runtime messages。
+
+兼容性：
+
+66. 现有全部测试继续通过。
+67. 不调用真实 API。
+68. 不污染 data/agent.db。
+69. 测试之间相互隔离。
+
+十三、API 演示脚本
+
+新增：
+
+scripts/api_demo.py
+
+运行方式：
+
+先启动服务：
+
+python -m uvicorn app.main:app --reload
+
+然后另一个终端：
+
+python -m scripts.api_demo
+
+api_demo 使用 httpx 调用本地 API，完成：
+
+1. 创建 weather-window。
+2. 创建 report-window。
+3. weather-window 发送：
+   查询东京天气并添加“出门带伞”。
+4. report-window 发送：
+   添加“周五前完成周报”。
+5. 分别查询消息。
+6. 分别查询 Todo。
+7. 查询 weather-window Trace。
+8. 打印 run_id 和事件类型。
+9. 验证两个窗口隔离。
+10. 不打印 API Key。
+
+十四、README
+
+更新 README：
+
+1. 增加 API 启动方式：
+
+python -m uvicorn app.main:app --reload
+
+2. 增加接口表。
+3. 增加 curl 示例。
+4. 说明 Chat 请求前必须创建 Session。
+5. 说明 user_id + session_id 隔离。
+6. 说明 Chat 返回 run_id。
+7. 说明如何查询 Trace。
+8. 说明错误响应结构。
+9. 说明缺少 LLM 配置时 Chat 返回 503，但健康检查可用。
+10. 增加 api_demo 使用方式。
+
+十五、开发记录
+
+将完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+更新 docs/PROBLEM_SOLVING.md：
+
+1. 为什么使用 ApplicationServices。
+2. 为什么不能在 import 时初始化 LLM。
+3. FastAPI lifespan 如何管理资源。
+4. 如何在测试中注入 Fake LLM。
+5. 为什么 Chat 不自动创建 Session。
+6. 如何映射 Agent 异常为 HTTP 状态码。
+7. 如何避免错误响应泄露敏感信息。
+8. 为什么 Trace 详情独立查询。
+9. 为什么 ChatResponse 不返回完整 Runtime messages。
+10. 后续网页如何调用这些 API。
+
+十六、限制
+
+1. 不实现最终网页聊天界面。
+2. 不修改 AgentRuntime 核心协议。
+3. 不增加 Agent 框架。
+4. 不增加 OpenAI SDK。
+5. 不自动执行 git commit。
+6. 不自动执行 git push。
+
+十七、完成后
+
+1. 运行：
+
+python -m pytest tests/test_sessions_api.py tests/test_chat_api.py tests/test_traces_api.py tests/test_app_lifecycle.py -q
+
+2. 运行：
+
+python -m pytest -q
+
+3. 修复全部失败。
+4. 启动 FastAPI。
+5. 运行 scripts/api_demo.py。
+6. 列出创建和修改文件。
+7. 说明 API 请求完整流程。
+8. 不执行 git commit 或 git push。
+```
