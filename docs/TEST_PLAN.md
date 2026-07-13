@@ -8,6 +8,7 @@
 4. 端到端测试使用真实 ToolRegistry、AgentRuntime、SessionAgentService、TraceRecorder 和 Fake LLM，覆盖多窗口主流程。
 5. 手动 UI 测试验证真实浏览器中的布局、键盘、离线恢复、抽屉、XSS 与长内容体验。
 6. 真实 LLM 验收使用 `.env` 中的兼容 API，验证模型选择工具、历史召回、压缩、Trace 与重启持久性。
+7. 文档测试与 Documentation Audit 验证必需材料、README 命令、Stage 记录、问题格式、API 路由、凭据、个人路径和 Mermaid fence。
 
 ## 覆盖范围
 
@@ -37,6 +38,12 @@ python -m scripts.final_acceptance
 
 ```bash
 python -m scripts.repository_audit
+```
+
+文档检查：
+
+```bash
+python -m scripts.documentation_audit
 ```
 
 并发测试使用线程事件、Barrier 和有限超时；任何等待都必须在数秒内结束，防止测试死锁。真实网络超时、浏览器视觉细节、不同兼容模型的非确定措辞和操作系统级 SQLite 调度无法稳定地完全自动化，需结合真实验收和 `docs/WEB_UI_CHECKLIST.md`。

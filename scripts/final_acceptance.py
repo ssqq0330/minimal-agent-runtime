@@ -108,7 +108,11 @@ def run_acceptance() -> Dict[str, bool]:
         calculator = service.chat(
             user,
             "weather-window",
-            "请必须调用 calculator 计算 12 * (3 + 2)，并在最终回答中明确写出结果。",
+            (
+                "这是 calculator 工具调用验收。第一步必须返回 tool_call 并调用 "
+                "calculator 计算 12 * (3 + 2)；即使你知道答案也禁止直接 final。"
+                "收到真实工具结果后，再在最终回答中明确写出结果。"
+            ),
         )
 
         checks["LLM API"] = all(
@@ -181,13 +185,16 @@ def run_acceptance() -> Dict[str, bool]:
             and recorder.list_runs(other_user, session_id="weather-window") == []
         )
 
+        failed_live_checks = [
+            name
+            for name in REPORT_ITEMS
+            if name != "Persistence After Restart" and not checks[name]
+        ]
         require(
-            all(
-                checks[name]
-                for name in REPORT_ITEMS
-                if name != "Persistence After Restart"
+            not failed_live_checks,
+            "live acceptance checks failed: {}".format(
+                ", ".join(failed_live_checks)
             ),
-            "one or more live acceptance checks failed",
         )
     finally:
         services.close()

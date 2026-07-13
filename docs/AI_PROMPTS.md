@@ -1,5 +1,163 @@
 # AI Prompts
 
+本文件不记录 API Key、`.env` 内容或冗长依赖安装日志。下面的 Stage 01～11 索引统一给出目标、主要 Prompt、生成内容和人工检查结果；其后的“原始阶段记录”保留各阶段较完整的历史 Prompt，便于审计开发过程。
+
+## Stage 01：FastAPI 项目骨架
+
+目标：
+建立可导入、可启动、可测试的最小仓库骨架，暂不实现 Agent 业务。
+
+Prompt：
+> 创建 Minimal Agent Runtime 的 FastAPI 骨架、`/api/health`、静态 Web 占位、requirements、环境变量示例、gitignore 和第一条测试；不要提前实现工具、LLM、Runtime、数据库或完整网页。
+
+生成内容：
+`app/main.py`、基础包目录、`web/`、`requirements.txt`、`.env.example`、`.gitignore` 与健康检查测试。
+
+人工检查结果：
+确认应用可导入、健康检查通过、仓库不包含密钥和数据库，提交记录为 `stage-01`。
+
+## Stage 02：Tool Registry 与三个工具
+
+目标：
+实现独立于 Agent 框架的工具协议、Registry、calculator、Mock search 和 Session 隔离 todo。
+
+Prompt：
+> 定义 `ToolContext/ToolResult/BaseTool` 与轻量 Schema 校验，实现工具注册、异常转换和默认工具；calculator 必须用 AST 禁止 eval，search 明确为 Mock，todo 按 `user_id + session_id` 隔离并提供完整测试。
+
+生成内容：
+`app/tools/` 的 Base、Registry 与三个工具，以及 `tests/test_tools.py`。
+
+人工检查结果：
+确认 Schema 可由未来 LLM 使用，calculator 拒绝危险语法，search 标记 `source=mock`，Todo 隔离与异常用例通过，提交记录为 `stage-02`。
+
+## Stage 03：真实 LLM Client、JSON 协议与 Parser
+
+目标：
+直接连接 OpenAI-Compatible Chat Completions API，并定义可验证的 `final/tool_call` 决策协议。
+
+Prompt：
+> 使用 httpx 自研同步 LLM Client，读取后端环境配置并分类配置/请求/响应错误；用 MockTransport 测试。设计只含简短 `reasoning_summary` 的 JSON 决策协议，支持纯 JSON、fence 和说明文字，严格校验多工具调用，不实现 Runtime；增加真实 tool-selection smoke test。
+
+生成内容：
+`app/llm/client.py`、`app/agent/parser.py`、`app/agent/prompts.py`、`scripts/llm_smoke_test.py` 与相应测试。
+
+人工检查结果：
+确认请求 URL/Header/Body 和资源所有权正确，错误不泄露 Key，Parser 不用大括号正则，真实 smoke test 与 Fake 测试职责分开，提交记录为 `stage-03`。
+
+## Stage 04：自研 Agent Runtime Loop
+
+目标：
+把 LLM 决策、Parser、Registry 和真实 ToolResult 组成多步循环。
+
+Prompt：
+> 实现 `AgentRuntime.run()`：构建 system/history/user 消息，调用 LLM，解析 final/tool_call，按顺序执行一个或多个工具，把带 call id 的真实结果回传，直到 final；工具失败可恢复，设置 max_steps，记录安全 step summary，不能引入 Agent 框架。
+
+生成内容：
+`app/agent/runtime.py`、`scripts/agent_runtime_demo.py` 与 Runtime 测试。
+
+人工检查结果：
+确认直接回答、单/多工具、多步、工具失败和 max_steps 均有测试，Runtime 不访问 SQLite，也不关闭注入 Client，提交记录为 `stage-04`。
+
+## Stage 05：SQLite Session、Message、Todo 与续聊
+
+目标：
+建立完整对话持久化，并把 Session 历史接入无状态 Runtime。
+
+Prompt：
+> 用 SQLite 实现 `(user_id, session_id)` 联合范围的 Session、Message、Todo 和 counter；短连接、参数绑定、事务与级联删除。新增 `SessionAgentService`，Chat 前召回历史、构建 ToolContext、Runtime 成功后原子保存 user/final assistant，失败不保存半轮；提供多窗口重启 Demo。
+
+生成内容：
+`app/memory/store.py`、`app/agent/session_service.py`、持久 Todo、`scripts/session_memory_demo.py` 与集成测试。
+
+人工检查结果：
+确认同 Session Todo id、并发分配、跨用户同名 Session、历史顺序、原子 exchange 和重启恢复，提交记录为 `stage-05a/05b`。
+
+## Stage 06：Context 管理与基础压缩
+
+目标：
+在不改写数据库完整历史和 Runtime 协议的前提下限制每轮模型 Context。
+
+Prompt：
+> 实现确定性的 `BasicContextManager`：归一化 role/content，以 `max_messages/max_chars` 触发，较早历史生成单条规则摘要，最近消息尽量保留，限制单条和摘要字符；摘要不写回消息或 metadata。接入 Session 服务并输出安全 Context 统计。
+
+生成内容：
+`app/memory/context.py`、Session Context 集成、`scripts/context_compression_demo.py` 与压缩测试。
+
+人工检查结果：
+确认 `history_limit → Context` 顺序、字符近似而非 Token、摘要不嵌套/不落库、metadata 不召回，提交记录为 `stage-06`。
+
+## Stage 07：Agent Trace
+
+目标：
+持久化可安全展示的一轮执行时间线，并与对话 Context 分离。
+
+Prompt：
+> 新增 `agent_runs/trace_events` 和 `SQLiteTraceRecorder`，每轮分配 run id，以 sequence 记录 start、context、decision、tool call/result 和 completed/failed；只保存短 reasoning summary，递归清洗凭据、系统 Prompt、原始响应和长字符串；Trace 不进入 Memory Context。
+
+生成内容：
+Trace 表、`app/observability/trace.py`、Session 集成、`scripts/trace_demo.py` 与 Trace 测试。
+
+人工检查结果：
+确认成功/失败终态、严格事件顺序、工具失败记录、级联删除、数据清洗和 Context 分离，提交记录为 `stage-07`。
+
+## Stage 08：FastAPI 完整后端
+
+目标：
+通过稳定 HTTP 契约暴露 Session、Chat、Todo 和 Trace。
+
+Prompt：
+> 建立显式 `ApplicationServices` 组合根和 lifespan；无 LLM 配置时降级启动。实现 Session CRUD、消息、Todo 查询、Chat、Trace 列表/详情/删除和健康接口；Pydantic 校验、固定错误映射、user ownership，测试使用完整离线 Fake LLM 图。
+
+生成内容：
+`app/api/`、`app/models/schemas.py`、`app/dependencies.py`、更新 `app/main.py`、`scripts/api_demo.py` 与 API 测试。
+
+人工检查结果：
+确认 Chat 不隐式建 Session、503 降级语义、Trace 详情按 user 隔离、错误不回显异常，提交记录为 `stage-08`。
+
+## Stage 09：原生 Web UI 与 Inspector
+
+目标：
+提供无需构建的多 Session 聊天、Todo 和 Trace 网页操作界面。
+
+Prompt：
+> 使用原生 HTML/CSS/ES Modules 实现多 Session 列表、消息、发送/重命名/清空/删除、响应式抽屉；增加 Todo 与 Trace Inspector、运行统计和安全轻量 Markdown。不要保存对话到 localStorage，不用 innerHTML，使用 AbortController、请求版本和归属快照解决响应竞态。
+
+生成内容：
+`web/index.html`、`styles.css`、`app.js`、`api.js`、`state.js`、`render.js`、`inspector.js` 与 Web 测试/人工清单。
+
+人工检查结果：
+确认双 Session 操作、Inspector 时间线、移动端抽屉、XSS 文本化和旧请求丢弃，提交记录为 `stage-09a/09b`。
+
+## Stage 10：端到端、并发、异常与仓库审计
+
+目标：
+补齐跨层主流程，修复同 Session 并发与敏感错误边界，形成发布前代码验收。
+
+Prompt：
+> 增加真实 Store/Runtime/Trace/Fake LLM 的端到端测试；用 `(user_id, session_id)` Session lock 串行化完整 Chat；强化错误和 Trace 清洗、SQL 风格输入、多用户 ownership、前端请求竞态；新增 repository audit 和真实 LLM final acceptance，记录已知限制。
+
+生成内容：
+`app/agent/session_locks.py`、`app/security.py`、端到端/并发/安全/Web hardening 测试、`scripts/repository_audit.py`、`scripts/final_acceptance.py` 与相关文档。
+
+人工检查结果：
+确认同 Session 顺序、不同 scope 并行、异常释放、Repository Audit、真实/Fake 验收边界和已知限制，提交记录为 `stage-10`。
+
+## Stage 11：最终文档、录屏与验收材料
+
+目标：
+不新增核心功能、不改 Runtime 协议，整理可由第三方运行、理解、演示和提交的完整材料。
+
+Prompt：
+> 全面重写 README，明确项目目标、核心特点、GitHub 链接、要求对照表、架构、Runtime、工具、Session/Memory、Context、Trace、Web、API、安装、真实 LLM、测试、安全和限制。新增 SYSTEM_DESIGN、MEMORY_DESIGN、API_REFERENCE、RECORDING_SCRIPT、SUBMISSION_CHECKLIST、FINAL_PROJECT_REPORT；重点说明 Memory 召回时机与 Context 放置。整理 Stage 01～11 Prompt 和统一问题记录。新增 documentation audit 与离线测试，最终运行 pytest、repository audit、documentation audit、真实 final acceptance；不得 commit 或 push。
+
+生成内容：
+最终 README、6 份专项文档、整理后的 Prompt/问题记录、`scripts/documentation_audit.py` 和 `tests/test_documentation.py`。
+
+人工检查结果：
+逐项对照真实路由、文件、默认配置和 Git 历史；检查无个人绝对路径、无真实密钥、Mermaid fence 闭合；运行四条最终验收命令并在交付回复中单独报告真实 LLM 环境结果。本阶段不执行 `git commit` 或 `git push`。
+
+# 原始阶段 Prompt 记录
+
 ## 2026-07-13: Project initialization
 
 Location: the user request in the current Codex task conversation.
