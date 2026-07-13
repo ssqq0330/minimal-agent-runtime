@@ -7,6 +7,16 @@ from app.agent.parser import (
     parse_llm_output,
 )
 from app.agent.prompts import build_agent_system_prompt, build_tool_result_message
+from app.agent.runtime import (
+    AgentDecisionError,
+    AgentInputError,
+    AgentLLMError,
+    AgentMaxStepsError,
+    AgentRunResult,
+    AgentRuntime,
+    AgentRuntimeError,
+    AgentStep,
+)
 
 __all__ = [
     "ParsedToolCall",
@@ -15,4 +25,12 @@ __all__ = [
     "parse_llm_output",
     "build_agent_system_prompt",
     "build_tool_result_message",
+    "AgentRuntime",
+    "AgentStep",
+    "AgentRunResult",
+    "AgentRuntimeError",
+    "AgentInputError",
+    "AgentMaxStepsError",
+    "AgentLLMError",
+    "AgentDecisionError",
 ]

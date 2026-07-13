@@ -1612,3 +1612,525 @@ python -m pytest tests/test_llm_smoke_test.py -q
 7. 给出运行真实冒烟测试的命令。
 8. 不执行 git commit 或 git push。
 ```
+
+## 2026-07-13: Core Agent Runtime loop
+
+Location: the user request in the current Codex task conversation.
+
+Full prompt:
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM HTTP 客户端、结构化输出解析器、系统 Prompt 和真实 API 冒烟测试
+
+现在开始第四阶段：自行实现 Agent Runtime 基本循环。
+
+这一阶段是项目的核心。禁止使用 LangChain、LangGraph、OpenAI Agents SDK、OpenHands、OpenClaw 或其他 Agent 框架。
+
+本阶段先实现 Runtime 核心和自动化测试，不实现 Session 数据库、Context 压缩、网页聊天和持久化 Trace。
+
+项目使用 Python 3.10。
+
+一、目标流程
+
+Agent Runtime 必须自行实现以下循环：
+
+1. 接收用户输入。
+2. 构造 system、history、user 消息。
+3. 调用真实或注入的 LLM Client。
+4. 使用 parse_llm_output 解析模型输出。
+5. 如果是 final，结束并返回答案。
+6. 如果是 tool_call：
+   - 根据工具名称从 ToolRegistry 查找工具
+   - 使用参数 Schema 校验并执行工具
+   - 将真实工具结果交还给 LLM
+7. LLM 根据工具结果决定：
+   - 继续调用工具
+   - 或返回 final
+8. 超过最大循环次数时终止。
+
+二、实现位置
+
+主要实现：
+
+app/agent/runtime.py
+
+可以按需要少量更新：
+
+app/agent/__init__.py
+app/observability/trace.py
+
+不要修改已有工具的公开行为。
+不要修改 LLM Client 的公开行为。
+不要修改 parser 的协议。
+
+三、Runtime 异常
+
+在 app/agent/runtime.py 中实现：
+
+1. AgentRuntimeError
+   - Runtime 异常基类
+
+2. AgentInputError
+   - 用户输入或 history 不合法
+
+3. AgentMaxStepsError
+   - 达到最大循环次数仍没有 final
+
+4. AgentLLMError
+   - LLM 请求或响应失败
+
+5. AgentDecisionError
+   - 模型输出无法解析或决策不合法
+
+错误信息必须清晰，并且不能包含 API Key。
+
+四、步骤记录
+
+实现 AgentStep 数据类。
+
+字段至少包含：
+
+- step_number: int
+- decision_type: str
+- reasoning_summary: str
+- tool_calls: list[dict[str, Any]]
+- tool_results: list[dict[str, Any]]
+- model: str | None = None
+
+提供：
+
+- to_dict()
+
+要求：
+
+1. 只记录 reasoning_summary。
+2. 不记录或虚构完整内部思维链。
+3. tool_results 必须来自真实 ToolRegistry.execute 返回值。
+4. 不记录 Authorization 请求头和 API Key。
+
+五、运行结果
+
+实现 AgentRunResult 数据类。
+
+字段至少包含：
+
+- answer: str
+- steps: list[AgentStep]
+- messages: list[dict[str, str]]
+- total_llm_calls: int
+- total_tool_calls: int
+- stopped_reason: str = "final"
+
+提供：
+
+- to_dict()
+
+要求：
+
+1. answer 必须是最终 final 决策中的回答。
+2. steps 保存每次 LLM 决策及对应工具结果。
+3. messages 保存本次运行中实际使用的上下文消息。
+4. stopped_reason 正常结束时为 final。
+5. 返回对象不能包含 API Key。
+
+六、AgentRuntime 初始化
+
+实现：
+
+AgentRuntime(
+    llm_client: OpenAICompatibleLLMClient,
+    tool_registry: ToolRegistry,
+    max_steps: int = 8
+)
+
+要求：
+
+1. llm_client 和 tool_registry 必须提供。
+2. max_steps 必须是大于 0 的整数。
+3. Runtime 不负责关闭外部传入的 LLM Client。
+4. Runtime 不在初始化时调用网络。
+
+七、run 方法
+
+实现：
+
+run(
+    user_input: str,
+    context: ToolContext,
+    history: list[dict[str, str]] | None = None
+) -> AgentRunResult
+
+输入校验：
+
+1. user_input 必须是非空字符串。
+2. context 必须是 ToolContext。
+3. history 为 None 时视为空列表。
+4. history 必须是 list。
+5. history 每项必须是 dict。
+6. history 中 role 只允许：
+   - user
+   - assistant
+7. history 中 content 必须是非空字符串。
+8. history 不允许调用者传入 system 消息。
+9. 不直接修改调用者传入的 history。
+
+初始 messages：
+
+[
+  {
+    "role": "system",
+    "content": build_agent_system_prompt(tool_registry.get_tool_schemas())
+  },
+  ...history,
+  {
+    "role": "user",
+    "content": user_input
+  }
+]
+
+八、Runtime 循环
+
+每一步执行：
+
+1. 调用：
+
+llm_client.complete(messages)
+
+2. total_llm_calls 加 1。
+
+3. 使用：
+
+parse_llm_output(response.content)
+
+解析决策。
+
+4. 将模型的原始结构化 content 作为 assistant 消息加入 messages：
+
+{
+  "role": "assistant",
+  "content": response.content
+}
+
+5. 如果 decision.type == final：
+
+- 创建 AgentStep
+- 返回 AgentRunResult
+- 不执行任何工具
+
+6. 如果 decision.type == tool_call：
+
+按 tool_calls 原顺序执行每个工具：
+
+tool_registry.execute(
+    name=tool_call.name,
+    arguments=tool_call.arguments,
+    context=context
+)
+
+7. 每次工具调用后：
+
+- total_tool_calls 加 1
+- 保存 ToolResult.to_dict()
+- 使用 build_tool_result_message 构造消息
+- 以 user role 加入 messages
+
+消息形式：
+
+{
+  "role": "user",
+  "content": build_tool_result_message(...)
+}
+
+因为当前 LLM Client 只支持 system、user、assistant，不使用 tool role。
+
+8. 一次决策包含多个 tool_calls 时：
+
+- 全部按顺序执行
+- 每个结果分别加入 messages
+- 然后进行下一次 LLM 调用
+
+9. 工具返回 success=false 时：
+
+- 不立即终止 Runtime
+- 将失败结果原样交给 LLM
+- 允许 LLM 修改参数、调用其他工具或返回 final
+
+10. 未知工具：
+
+- ToolRegistry 应返回失败 ToolResult
+- Runtime 将失败结果交给 LLM
+- 不产生未捕获异常
+
+11. 达到 max_steps 且仍未得到 final：
+
+抛出 AgentMaxStepsError。
+
+九、异常处理
+
+1. LLMConfigurationError、LLMRequestError、LLMResponseError：
+   - 转换成 AgentLLMError
+   - 保留简洁错误原因
+   - 不包含 API Key
+
+2. AgentOutputParseError：
+   - 转换成 AgentDecisionError
+
+3. 工具内部异常：
+   - 应由 ToolRegistry 转换成失败 ToolResult
+   - Runtime 不应崩溃
+
+4. 不要使用宽泛的 except Exception 隐藏程序错误。
+5. 可以在边界处捕获异常，但必须保留明确分类。
+
+十、工具结果关联
+
+AgentStep.tool_calls 和 tool_results 必须保持相同顺序。
+
+每条工具结果记录建议包含：
+
+{
+  "tool_call_id": "call_1",
+  "tool_name": "calculator",
+  "arguments": {
+    "expression": "12 * (3 + 2)"
+  },
+  "result": {
+    "success": true,
+    "output": {
+      "expression": "12 * (3 + 2)",
+      "result": 60
+    },
+    "error": null
+  }
+}
+
+这样后续网页 Trace 可以直接展示。
+
+十一、模块导出
+
+更新 app/agent/__init__.py，导出：
+
+- AgentRuntime
+- AgentStep
+- AgentRunResult
+- AgentRuntimeError
+- AgentInputError
+- AgentMaxStepsError
+- AgentLLMError
+- AgentDecisionError
+
+保留已有 parser 和 prompts 导出。
+
+十二、Fake LLM 测试辅助
+
+在 tests 中实现简单的 FakeLLMClient，不需要放入正式生产代码。
+
+Fake Client：
+
+1. 构造时接收预设 response content 列表。
+2. complete 每调用一次，返回下一个 LLMResponse。
+3. 保存每次收到的 messages，方便断言。
+4. 响应耗尽时给出明确错误。
+5. 不调用真实网络。
+
+十三、测试
+
+新增：
+
+tests/test_agent_runtime.py
+
+至少覆盖：
+
+输入与初始化：
+
+1. max_steps 正常初始化。
+2. max_steps 等于 0 失败。
+3. max_steps 为负数失败。
+4. max_steps 不是整数失败。
+5. user_input 为空失败。
+6. user_input 不是字符串失败。
+7. context 类型错误失败。
+8. history 不是列表失败。
+9. history 项不是 dict 失败。
+10. history 包含 system role 失败。
+11. history role 非法失败。
+12. history content 为空失败。
+13. 不修改原始 history。
+
+直接回答：
+
+14. 第一次 LLM 返回 final。
+15. answer 正确。
+16. total_llm_calls 等于 1。
+17. total_tool_calls 等于 0。
+18. steps 只有一项。
+19. stopped_reason 为 final。
+20. messages 包含 system、user、assistant。
+21. system Prompt 中包含三个工具 Schema。
+
+单工具循环：
+
+22. 第一次返回 calculator tool_call。
+23. Runtime 真实执行 calculator。
+24. 工具结果中 result 等于 60。
+25. 第二次 LLM 返回 final。
+26. total_llm_calls 等于 2。
+27. total_tool_calls 等于 1。
+28. 第二次 LLM 收到真实工具结果。
+29. 工具结果消息包含 call_1。
+30. 工具结果消息包含 calculator。
+31. 工具结果消息包含 60。
+
+多工具调用：
+
+32. 一次决策包含 search 和 todo。
+33. 两个工具都按顺序执行。
+34. total_tool_calls 等于 2。
+35. 第二次 LLM 收到两个工具结果。
+36. AgentStep 中 tool_calls 与 tool_results 顺序一致。
+
+继续循环：
+
+37. 第一轮调用工具。
+38. 第二轮再次调用工具。
+39. 第三轮返回 final。
+40. total_llm_calls 等于 3。
+41. steps 数量等于 3。
+
+失败恢复：
+
+42. calculator 除零返回失败。
+43. Runtime 不立即终止。
+44. 失败结果被传给 LLM。
+45. LLM 可以随后返回 final。
+46. 未知工具不会导致 Runtime 崩溃。
+47. 未知工具结果 success=false。
+48. 未知工具错误被传给下一次 LLM。
+
+Session Context：
+
+49. Todo 工具收到正确 user_id。
+50. Todo 工具收到正确 session_id。
+51. 相同 Runtime 使用不同 context 时 Todo 相互隔离。
+
+异常：
+
+52. LLMRequestError 转换为 AgentLLMError。
+53. LLMResponseError 转换为 AgentLLMError。
+54. 解析失败转换为 AgentDecisionError。
+55. 达到 max_steps 抛出 AgentMaxStepsError。
+56. max_steps 场景不会无限循环。
+
+结果与安全：
+
+57. AgentRunResult.to_dict 正确。
+58. AgentStep.to_dict 正确。
+59. 不包含完整内部思维链字段。
+60. 返回内容不包含 API Key。
+61. Runtime 不关闭外部 LLM Client。
+
+测试要求：
+
+1. 不调用真实网络。
+2. 不依赖 .env。
+3. 测试之间相互隔离。
+4. 不依赖执行顺序。
+5. 保留此前所有测试。
+6. 修复全部测试失败。
+
+十四、真实 Runtime 演示脚本
+
+创建：
+
+scripts/agent_runtime_demo.py
+
+运行方式：
+
+python -m scripts.agent_runtime_demo
+
+流程：
+
+1. 从 .env 加载真实 LLM 配置。
+2. 创建 OpenAICompatibleLLMClient。
+3. 创建默认 ToolRegistry。
+4. 创建 AgentRuntime，max_steps=5。
+5. 创建：
+
+ToolContext(
+    user_id="demo-user",
+    session_id="demo-session"
+)
+
+6. 调用：
+
+runtime.run(
+    user_input="请帮我计算 12 * (3 + 2)，并告诉我结果。",
+    context=context
+)
+
+7. 打印：
+   - 最终 answer
+   - total_llm_calls
+   - total_tool_calls
+   - 每一步 reasoning_summary
+   - 工具名称、参数和结果
+
+8. 不打印 API Key。
+9. 确保关闭 LLM Client。
+10. 出错时清晰输出并使用非零退出码。
+
+这次真实演示应该真正执行 calculator，并最终得到与 60 一致的回答。
+
+十五、文档
+
+1. 更新 README，增加 Agent Runtime Loop 说明。
+2. 增加真实 Runtime 演示命令：
+
+python -m scripts.agent_runtime_demo
+
+3. 明确区分：
+   - llm_smoke_test：只验证模型选择工具
+   - agent_runtime_demo：真正执行工具并继续 Loop
+
+4. 将本次完整提示词追加到 docs/AI_PROMPTS.md。
+5. 在 docs/PROBLEM_SOLVING.md 记录：
+   - Runtime Loop 如何实现
+   - 为什么工具失败后仍交还给 LLM
+   - 为什么设置 max_steps
+   - 为什么当前工具结果使用 user role
+   - 为什么只记录 reasoning_summary
+   - 多工具调用如何保持顺序
+   - Runtime 如何传递 user_id 和 session_id
+
+十六、限制
+
+1. 不实现 SQLite Session。
+2. 不实现长期 Memory。
+3. 不实现 Context 压缩。
+4. 不实现网页聊天。
+5. 不持久化 Trace。
+6. 不修改现有工具公开行为。
+7. 不使用 Agent 框架。
+8. 不自动执行 git commit 或 git push。
+
+十七、完成后
+
+1. 运行：
+
+python -m pytest -q
+
+2. 单独运行：
+
+python -m pytest tests/test_agent_runtime.py -q
+
+3. 修复全部失败测试。
+4. 列出创建和修改的文件。
+5. 说明 Runtime 一次完整循环。
+6. 给出真实 Runtime Demo 的运行命令。
+7. 不执行 git commit。
+8. 不执行 git push。
+```

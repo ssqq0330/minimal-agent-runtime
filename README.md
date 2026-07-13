@@ -4,7 +4,8 @@
 
 Build a minimal, self-managed Agent runtime step by step without using an Agent
 framework. The project currently includes tools, an OpenAI-compatible HTTP
-client, a structured Agent output parser, and a manual LLM smoke test.
+client, a structured Agent output parser, a core Agent Runtime loop, and manual
+real-service demos.
 
 ## Technology stack
 
@@ -16,9 +17,9 @@ client, a structured Agent output parser, and a manual LLM smoke test.
 
 ## Current status
 
-The current milestone can ask a configured LLM to choose a tool and parse its
-structured decision. It intentionally does not execute the selected tool or run
-an Agent loop yet.
+The current milestone runs the basic Agent loop: it asks the LLM for a
+structured decision, executes requested registered tools, returns real tool
+results to the model, and stops when the model produces a final answer.
 
 ## Run locally
 
@@ -73,6 +74,28 @@ The smoke test checks only that:
 
 It does not execute `calculator` or any other tool.
 
+## Agent Runtime demo
+
+The Runtime demo performs the complete current loop and really executes the
+selected tool:
+
+```cmd
+python -m scripts.agent_runtime_demo
+```
+
+The two manual scripts serve different purposes:
+
+- `llm_smoke_test` verifies only API access, Tool Schema visibility, tool
+  selection, and JSON parsing. It never executes a tool.
+- `agent_runtime_demo` lets the model select tools, executes them through
+  `ToolRegistry`, sends each real result back to the model, and waits for a
+  final answer.
+
+The Runtime limits the number of LLM decision steps so malformed or repetitive
+model behavior cannot create an infinite loop. Tool failures are returned to
+the LLM as real results so it can correct its arguments, choose another tool,
+or answer the user.
+
 ## Current architecture
 
 ```text
@@ -87,6 +110,15 @@ JSON 输出
 Agent Output Parser
   ↓
 AgentDecision(final/tool_call)
+  ├─ final → Final answer
+  └─ tool_call
+       ↓
+     ToolRegistry.execute
+       ↓
+     Real tool result
+       ↓
+     Return result to LLM and continue
 ```
 
-The real tool-execution loop will be connected in stage 04.
+Session persistence, long-term memory, context compression, and persistent
+traces remain future milestones.

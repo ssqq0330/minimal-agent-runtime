@@ -110,3 +110,30 @@
 - Why Runtime is next: A complete loop needs call correlation, execution limits,
   tool-result messages, repeated model calls, and termination rules. Keeping
   those concerns out of this smoke test makes real-service diagnosis precise.
+
+## 2026-07-13: Core Agent Runtime loop
+
+- Runtime loop: Each run builds system/history/user messages, calls the LLM,
+  parses one structured decision, appends the original assistant JSON, executes
+  requested tools in order, appends one real result message per call, and
+  repeats until `final`.
+- Tool failure recovery: A failed `ToolResult` is useful model input rather than
+  a Runtime exception. Returning it unchanged lets the model correct arguments,
+  choose another tool, ask the user, or produce a final explanation.
+- Step limit: `max_steps` provides deterministic termination when a model keeps
+  requesting tools or never emits `final`, preventing an unbounded LLM/tool loop.
+- Tool results use `user`: The current LLM client deliberately accepts only
+  `system`, `user`, and `assistant`. A structured user message carries the real
+  tool result until a future protocol explicitly supports a `tool` role.
+- Reasoning records: Steps store only the model-provided short
+  `reasoning_summary`; no full chain of thought is requested, invented, or
+  persisted.
+- Multiple calls: Calls are executed in the exact list order. Parallel arrays
+  of call records and result records preserve correlation, while each result
+  also contains its `tool_call_id`, tool name, arguments, and `ToolResult`.
+- Context propagation: The same caller-supplied `ToolContext` is passed to every
+  `ToolRegistry.execute()` call. Stateful tools therefore receive the correct
+  `user_id` and `session_id` and retain their existing isolation behavior.
+- Ownership and safety: Runtime never closes its injected LLM client. Known API
+  keys are redacted recursively from returned messages and step records, and
+  LLM boundary errors are converted to concise Runtime categories.
