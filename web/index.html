@@ -1,17 +1,219 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="Minimal Agent Runtime 多 Session 聊天界面">
     <title>Minimal Agent Runtime</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <main class="page">
-      <h1>Minimal Agent Runtime</h1>
-      <p>Agent Runtime is running</p>
-      <p class="hint">More features are under development.</p>
-    </main>
-    <script src="/static/app.js"></script>
+    <a class="skip-link" href="#message-input">跳到消息输入框</a>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-group">
+          <button
+            id="toggle-sidebar-button"
+            class="icon-button sidebar-toggle"
+            type="button"
+            aria-label="收起 Session 侧边栏"
+            aria-controls="session-sidebar"
+            aria-expanded="true"
+          >
+            <span aria-hidden="true">☰</span>
+          </button>
+          <div>
+            <p class="eyebrow">LOCAL AGENT WORKSPACE</p>
+            <h1 id="app-title">Minimal Agent Runtime</h1>
+          </div>
+        </div>
+
+        <div class="topbar-controls">
+          <form id="user-form" class="user-form">
+            <label for="user-id-input">用户 ID</label>
+            <div class="input-action-group">
+              <input
+                id="user-id-input"
+                name="user_id"
+                type="text"
+                autocomplete="off"
+                maxlength="120"
+                aria-describedby="user-id-help"
+              >
+              <button id="apply-user-button" class="secondary-button" type="submit">应用</button>
+            </div>
+            <p id="user-id-help" class="field-help">仅用于演示数据隔离，不代表真实登录或鉴权。</p>
+          </form>
+
+          <div id="service-status" class="service-status is-checking" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-copy">
+              <strong>正在检查服务</strong>
+              <small>请稍候</small>
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <aside id="session-sidebar" class="session-sidebar" aria-label="Session 导航">
+        <div class="sidebar-heading">
+          <div>
+            <p class="eyebrow">CONVERSATIONS</p>
+            <h2>Sessions</h2>
+          </div>
+          <button
+            id="refresh-sessions-button"
+            class="icon-button sidebar-icon-button"
+            type="button"
+            aria-label="刷新 Session 列表"
+            title="刷新 Session 列表"
+          >↻</button>
+        </div>
+
+        <button id="new-session-button" class="primary-button new-session-button" type="button">
+          <span aria-hidden="true">＋</span>
+          新建会话
+        </button>
+
+        <div id="session-list" class="session-list" aria-live="polite"></div>
+
+        <div class="sidebar-note">
+          <strong>隔离边界</strong>
+          <p>Session 由 <code>user_id + session_id</code> 隔离，消息由后端持久化。</p>
+        </div>
+      </aside>
+
+      <main class="chat-main">
+        <header class="chat-header">
+          <div class="current-session-copy">
+            <p class="eyebrow">ACTIVE SESSION</p>
+            <h2 id="current-session-title">请选择一个 Session</h2>
+            <p id="current-session-meta">新建或选择会话后即可开始。</p>
+          </div>
+          <div class="session-actions" aria-label="当前 Session 操作">
+            <button id="clear-messages-button" class="ghost-button" type="button" disabled>清空消息</button>
+            <button id="rename-session-button" class="ghost-button" type="button" disabled>重命名</button>
+            <button id="delete-session-button" class="danger-button" type="button" disabled>删除</button>
+          </div>
+        </header>
+
+        <section class="conversation" aria-label="聊天消息">
+          <div id="message-list" class="message-list" role="log" aria-live="polite" aria-relevant="additions text"></div>
+
+          <div id="empty-chat-state" class="empty-chat-state">
+            <div class="empty-mark" aria-hidden="true">✦</div>
+            <p class="eyebrow">READY WHEN YOU ARE</p>
+            <h3>选择一个 Session 开始对话</h3>
+            <p>Agent 会根据请求自主决定是否调用 calculator、search 或 todo 工具。</p>
+          </div>
+
+          <div id="chat-loading" class="chat-loading" role="status" aria-live="polite" hidden>
+            <span class="loading-orbit" aria-hidden="true"></span>
+            <span>Agent 正在思考和调用工具</span>
+          </div>
+        </section>
+
+        <form id="message-form" class="composer">
+          <label for="message-input">发送给 Agent 的消息</label>
+          <div class="composer-box">
+            <textarea
+              id="message-input"
+              name="message"
+              rows="3"
+              maxlength="8000"
+              placeholder="选择 Session 后输入消息…"
+              aria-describedby="composer-help character-count"
+              disabled
+            ></textarea>
+            <div class="composer-footer">
+              <p id="composer-help">Enter 发送 · Shift + Enter 换行</p>
+              <div class="composer-actions">
+                <span id="character-count" aria-live="polite">0 / 8000</span>
+                <button id="send-button" class="primary-button send-button" type="submit" disabled>发送</button>
+              </div>
+            </div>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <dialog id="session-dialog" class="app-dialog" aria-labelledby="session-dialog-title">
+      <form id="session-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">NEW CONVERSATION</p>
+            <h2 id="session-dialog-title">新建会话</h2>
+          </div>
+          <button class="icon-button dialog-close-button" type="button" aria-label="关闭新建会话窗口">×</button>
+        </div>
+        <label for="new-session-title">会话标题</label>
+        <input id="new-session-title" name="title" type="text" value="新会话" maxlength="200" required>
+        <label for="new-session-id">Session ID <span>可选</span></label>
+        <input id="new-session-id" name="session_id" type="text" maxlength="120" placeholder="留空则由后端生成">
+        <p class="dialog-help">同一用户下的 Session ID 必须唯一。</p>
+        <div class="dialog-actions">
+          <button class="secondary-button dialog-cancel-button" type="button">取消</button>
+          <button id="create-session-submit" class="primary-button" type="submit">创建 Session</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="app-dialog" aria-labelledby="rename-dialog-title">
+      <form id="rename-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">SESSION SETTINGS</p>
+            <h2 id="rename-dialog-title">重命名会话</h2>
+          </div>
+          <button class="icon-button dialog-close-button" type="button" aria-label="关闭重命名窗口">×</button>
+        </div>
+        <label for="rename-session-title">新标题</label>
+        <input id="rename-session-title" name="title" type="text" maxlength="200" required>
+        <div class="dialog-actions">
+          <button class="secondary-button dialog-cancel-button" type="button">取消</button>
+          <button id="rename-session-submit" class="primary-button" type="submit">保存标题</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" class="app-dialog danger-dialog" aria-labelledby="delete-dialog-title">
+      <form id="delete-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">DESTRUCTIVE ACTION</p>
+            <h2 id="delete-dialog-title">删除这个 Session？</h2>
+          </div>
+          <button class="icon-button dialog-close-button" type="button" aria-label="关闭删除确认窗口">×</button>
+        </div>
+        <p id="delete-session-description">此操作会级联删除该 Session 的消息、Todo 和 Trace，且无法撤销。</p>
+        <div class="dialog-actions">
+          <button class="secondary-button dialog-cancel-button" type="button">保留 Session</button>
+          <button id="confirm-delete-button" class="danger-button" type="submit">确认删除</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="clear-dialog" class="app-dialog danger-dialog" aria-labelledby="clear-dialog-title">
+      <form id="clear-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">CLEAR HISTORY</p>
+            <h2 id="clear-dialog-title">清空聊天消息？</h2>
+          </div>
+          <button class="icon-button dialog-close-button" type="button" aria-label="关闭清空消息确认窗口">×</button>
+        </div>
+        <p>只删除当前 Session 的消息；Session、Todo 和 Trace 会保留。</p>
+        <div class="dialog-actions">
+          <button class="secondary-button dialog-cancel-button" type="button">取消</button>
+          <button id="confirm-clear-button" class="danger-button" type="submit">确认清空</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast-container" class="toast-container" aria-live="assertive" aria-atomic="false"></div>
+
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

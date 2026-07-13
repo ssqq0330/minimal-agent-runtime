@@ -1612,7 +1612,6 @@ python -m pytest tests/test_llm_smoke_test.py -q
 7. 给出运行真实冒烟测试的命令。
 8. 不执行 git commit 或 git push。
 ```
-
 ## 2026-07-13: Core Agent Runtime loop
 
 Location: the user request in the current Codex task conversation.
@@ -5910,3 +5909,684 @@ python -m pytest -q
 7. 说明 API 请求完整流程。
 8. 不执行 git commit 或 git push。
 ```
+
+## Stage 09A：原生多 Session Agent 聊天主界面
+
+````text
+当前项目已经完成并提交：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、JSON 解析器和 Prompt
+stage-04：自行实现 Agent Runtime Loop
+stage-05：SQLite Session、消息和 Todo 持久化
+stage-06：Context 长度管理和基础压缩
+stage-07：Agent Trace 持久化
+stage-08：FastAPI Session、Chat、Todo 和 Trace API
+
+当前 Git 最新提交：
+
+bd1e877 stage-08: implement FastAPI session chat and trace APIs
+
+现在开始第九阶段第一部分：实现原生 HTML、CSS、JavaScript 的多 Session Agent 聊天主界面。
+
+本阶段先实现聊天主流程，不实现完整 Trace 时间线面板和 Todo 管理面板；Trace 与 Todo 的完整可视化放在 9B。
+
+禁止使用：
+
+- React
+- Vue
+- Angular
+- Svelte
+- jQuery
+- Bootstrap
+- Tailwind CDN
+- 其他前端框架
+- LangChain、LangGraph 或其他 Agent 框架
+
+不增加 Node.js、npm 或前端构建步骤。
+
+页面必须可以直接由当前 FastAPI 的静态文件服务访问：
+
+http://127.0.0.1:8000/
+
+项目使用原生 HTML、CSS 和 JavaScript ES Modules。
+
+一、页面总体布局
+
+实现三部分布局：
+
+左侧 Session 侧边栏
+中间聊天主区域
+顶部用户与状态栏
+
+桌面端布局建议：
+
+┌─────────────────────────────────────────────────────────────┐
+│ Minimal Agent Runtime    用户 ID        服务状态             │
+├─────────────────┬───────────────────────────────────────────┤
+│ Session 列表    │ 当前 Session 标题                         │
+│                 │                                           │
+│ + 新建会话      │ 消息列表                                  │
+│                 │                                           │
+│ 天气窗口        │                                           │
+│ 周报窗口        │                                           │
+│                 │                                           │
+│                 ├───────────────────────────────────────────┤
+│                 │ 输入框                           发送      │
+└─────────────────┴───────────────────────────────────────────┘
+
+移动端或窄屏时：
+
+- Session 侧边栏可以收起
+- 聊天区域占满宽度
+- 不允许出现严重横向溢出
+
+二、修改文件
+
+主要修改：
+
+web/index.html
+web/styles.css
+web/app.js
+
+可以新增：
+
+web/api.js
+web/state.js
+web/utils.js
+
+建议使用：
+
+<script type="module" src="/static/app.js"></script>
+
+如果当前静态挂载路径不是 /static，请根据 app/main.py 的实际配置正确引用。
+
+不要修改 Agent Runtime、SQLiteStore、工具和 LLM Client。
+
+三、index.html
+
+页面至少包含以下语义结构和唯一 id：
+
+1. 应用标题
+
+id="app-title"
+
+内容：
+
+Minimal Agent Runtime
+
+2. 用户区域
+
+- user-id-input
+- apply-user-button
+- service-status
+
+3. Session 区域
+
+- session-sidebar
+- session-list
+- new-session-button
+- refresh-sessions-button
+- toggle-sidebar-button
+
+4. 当前 Session 标题区域
+
+- current-session-title
+- rename-session-button
+- delete-session-button
+
+5. 聊天消息区域
+
+- message-list
+- empty-chat-state
+- chat-loading
+
+6. 消息输入区域
+
+- message-input
+- send-button
+- character-count
+
+7. 全局错误或提示区域
+
+- toast-container
+
+8. 页面中增加简短说明：
+
+- Session 由 user_id + session_id 隔离
+- 消息由后端持久化
+- 工具调用由 Agent 自主决定
+
+要求：
+
+1. 使用正确的 button、input、textarea、main、aside、header 等语义标签。
+2. 按钮必须有清晰文本或 aria-label。
+3. textarea 有 label 或 aria-label。
+4. 不在 HTML 中写 API Key。
+5. 不引入外部 CDN。
+6. 不使用内联 onclick。
+7. JavaScript 全部通过 addEventListener 绑定。
+8. 页面默认不显示伪造的聊天消息。
+
+四、API 封装
+
+在 web/api.js 中实现统一 API 请求。
+
+建议实现：
+
+class ApiError extends Error {
+  constructor(message, status, code, details) { ... }
+}
+
+async function apiRequest(path, options = {})
+
+async function healthCheck()
+async function createSession(payload)
+async function listSessions(userId)
+async function getSession(userId, sessionId)
+async function renameSession(userId, sessionId, title)
+async function deleteSession(userId, sessionId)
+async function listMessages(userId, sessionId, limit = 200)
+async function clearMessages(userId, sessionId)
+async function sendChat(payload)
+
+要求：
+
+1. 使用 fetch。
+2. 同源请求，不写死主机地址。
+3. 默认请求 /api/...。
+4. JSON 请求自动设置 Content-Type。
+5. 204 响应正确处理，不尝试解析 JSON。
+6. 非 2xx 时解析统一错误结构：
+
+{
+  "error": {
+    "code": "...",
+    "message": "..."
+  }
+}
+
+7. 后端不是 JSON 时返回友好的 ApiError。
+8. 网络错误转换成“无法连接后端服务”等用户可理解信息。
+9. 不把完整堆栈展示给用户。
+10. 不记录 API Key。
+11. 不使用 eval。
+12. 导出所需函数。
+
+五、前端状态
+
+在 web/state.js 中实现简单状态管理，不使用框架。
+
+状态至少包含：
+
+- userId
+- sessions
+- activeSessionId
+- messages
+- isLoadingSessions
+- isLoadingMessages
+- isSending
+- serviceAvailable
+- lastRunId
+
+可以实现：
+
+const state = { ... }
+
+function setState(partial)
+function subscribe(listener)
+function getState()
+
+或者采用简单、可维护的等价实现。
+
+要求：
+
+1. 状态修改集中管理。
+2. 不直接把服务端 Session 数据永久写入 localStorage。
+3. localStorage 只保存：
+   - minimal-agent.user-id
+   - minimal-agent.active-session-id
+   - minimal-agent.sidebar-collapsed
+4. 不保存聊天内容到 localStorage。
+5. 不保存 Trace、Todo 或 API 响应。
+6. 不保存任何密钥。
+7. activeSessionId 必须属于当前用户实际 Session 列表。
+8. 切换 userId 后清除旧用户的 sessions、messages 和 activeSessionId。
+
+六、初始化流程
+
+页面加载后执行：
+
+1. 调用 GET /api/health。
+2. 更新 service-status。
+3. 从 localStorage 读取 userId。
+4. 如果没有 userId，默认使用：
+
+demo-user
+
+5. 加载该用户 Session 列表。
+6. 如果 localStorage 中有合法 activeSessionId，则选中。
+7. 否则选择最新 Session。
+8. 如果没有任何 Session：
+   - 展示空状态
+   - 不自动创建 Session
+   - 提示用户点击“新建会话”
+9. 选中 Session 后加载消息历史。
+10. 初始化失败时显示友好提示，页面不能白屏。
+
+七、用户切换
+
+用户在 user-id-input 中输入新用户 ID，点击 apply-user-button。
+
+要求：
+
+1. 去除首尾空格。
+2. 空字符串不能提交。
+3. 切换后：
+   - 保存新的 userId 到 localStorage
+   - 清除当前 Session
+   - 清除消息列表
+   - 加载新用户 Session
+4. 用户 A 的 Session 不得继续显示给用户 B。
+5. 切换过程中禁用按钮。
+6. Enter 键可以确认用户 ID。
+7. 显示当前正在使用的 userId。
+8. 明确提醒这是演示用用户标识，不是真实鉴权系统。
+
+八、Session 列表
+
+调用：
+
+GET /api/sessions?user_id=...
+
+展示每个 Session：
+
+- title
+- session_id 的短形式，可选
+- updated_at 的友好时间
+- 当前选中状态
+
+要求：
+
+1. Session 列表按后端顺序展示。
+2. 当前 Session 有明显高亮。
+3. 点击 Session：
+   - 切换 activeSessionId
+   - 保存到 localStorage
+   - 加载该 Session 消息
+4. 切换时不能显示上一个 Session 的旧消息。
+5. 加载期间显示 Skeleton 或加载提示。
+6. Session 列表为空时显示说明。
+7. 对 Session 标题使用 textContent，禁止把标题直接拼进 innerHTML。
+8. session_id 不能作为 HTML id 直接拼接，避免特殊字符问题。
+
+九、新建 Session
+
+点击 new-session-button 打开轻量对话框。
+
+可以使用原生 <dialog>，也可以实现自定义 Modal。
+
+输入：
+
+- title
+- session_id，可选
+
+要求：
+
+1. title 默认“新会话”。
+2. session_id 留空时由后端生成。
+3. 调用 POST /api/sessions。
+4. 创建成功后：
+   - 刷新 Session 列表
+   - 自动选中新 Session
+   - 清空并加载消息
+   - 关闭对话框
+5. 重复 session_id 时显示后端 409 错误。
+6. 提交时防止重复点击。
+7. Escape 可以关闭对话框。
+8. 关闭后清理错误提示。
+9. 不自动发送聊天消息。
+
+十、重命名 Session
+
+点击 rename-session-button：
+
+1. 当前没有 Session 时禁用。
+2. 弹出重命名对话框。
+3. 默认填入当前标题。
+4. 调用 PATCH /api/sessions/{session_id}。
+5. 成功后更新：
+   - 侧边栏标题
+   - current-session-title
+6. 空标题不能提交。
+7. 显示后端错误。
+8. 使用 textContent 渲染标题。
+
+十一、删除 Session
+
+点击 delete-session-button：
+
+1. 当前没有 Session 时禁用。
+2. 使用自定义确认对话框或 window.confirm。
+3. 明确提示：
+   - 消息
+   - Todo
+   - Trace
+   将随 Session 一起删除。
+4. 调用 DELETE /api/sessions/{session_id}?user_id=...
+5. 成功后：
+   - 清除 activeSessionId
+   - 刷新列表
+   - 自动选择剩余最新 Session
+   - 如果无 Session，显示空状态
+6. 不能误删其他用户同名 Session。
+7. 删除过程中禁用按钮。
+
+十二、消息历史展示
+
+调用：
+
+GET /api/sessions/{session_id}/messages?user_id=...&limit=200
+
+每条消息显示：
+
+- user 或 assistant 的角色
+- content
+- created_at
+- assistant 消息可以显示简短 Agent 统计：
+  - LLM 调用次数
+  - 工具调用次数
+  - 是否发生 Context 压缩
+
+要求：
+
+1. user 消息右侧展示。
+2. assistant 消息左侧展示。
+3. 内容保留换行。
+4. 禁止把消息内容直接设置为 innerHTML。
+5. 使用 textContent。
+6. 不执行消息中的 HTML、script 或 Markdown HTML。
+7. metadata 只读取后端允许公开的统计字段。
+8. 不显示完整 reasoning_summary。
+9. 不显示 API Key。
+10. 加载完成后滚动到底部。
+11. Session 没有消息时显示 empty-chat-state。
+12. 切换 Session 时清空旧 DOM 后再加载。
+13. 后端返回空列表时不能报错。
+
+十三、发送消息
+
+输入区域：
+
+textarea id="message-input"
+button id="send-button"
+
+行为：
+
+1. 没有选中 Session 时禁止发送。
+2. 空消息或纯空白不能发送。
+3. message 最大前端建议长度 8000 字符。
+4. Enter 发送。
+5. Shift+Enter 换行。
+6. 发送前将用户消息以“待发送状态”临时显示。
+7. 调用 POST /api/chat：
+
+{
+  "user_id": "...",
+  "session_id": "...",
+  "message": "..."
+}
+
+8. 请求期间：
+   - isSending=true
+   - 禁用发送按钮
+   - 禁用 Session 删除
+   - 显示“Agent 正在思考和调用工具”
+9. 成功后：
+   - 使用后端返回的 user_message 和 assistant_message
+   - 避免重复显示临时消息
+   - 保存 lastRunId
+   - 清空输入框
+   - 更新字符计数
+   - 刷新 Session 列表，使 updated_at 排序更新
+   - 保持当前 Session 选中
+   - 滚动到底部
+10. 失败后：
+   - 移除或标记临时消息失败
+   - 输入框保留原消息，方便重试
+   - 显示统一错误
+11. 防止重复发送。
+12. 请求过程中按 Enter 不得重复提交。
+13. 当前用户或 Session 在请求过程中发生变化时，不能把响应渲染到错误窗口。
+14. 可以通过保存 requestUserId 和 requestSessionId 做响应归属校验。
+15. 不在前端伪造 Agent 最终答案。
+
+十四、错误提示
+
+实现 Toast 或顶部通知。
+
+至少支持：
+
+- success
+- error
+- info
+
+要求：
+
+1. 错误信息用户可理解。
+2. 自动消失，例如 4～6 秒。
+3. 重要错误可手动关闭。
+4. 同一错误短时间内避免大量重复。
+5. 不展示 traceback。
+6. 不展示原始 HTTP 响应。
+7. 不展示 API Key。
+8. 后端 503 时提示：
+   “LLM 尚未配置，请检查服务端 .env。”
+9. 404 Session 不存在时刷新 Session 列表。
+10. 网络断开时服务状态显示离线。
+
+十五、服务状态
+
+healthCheck 返回后展示：
+
+- 在线
+- LLM 已配置 / 未配置
+- 数据库可用
+
+要求：
+
+1. 不调用真实 LLM。
+2. 每 30～60 秒可重新检查一次。
+3. 页面隐藏时不必高频检查。
+4. 服务离线时仍可展示当前页面，但禁用发送。
+5. 页面关闭时清理 interval。
+6. 不显示敏感配置。
+
+十六、时间格式
+
+实现 formatDateTime(value)。
+
+要求：
+
+1. 使用 Intl.DateTimeFormat。
+2. 使用浏览器本地时区。
+3. 无效时间显示空字符串或“未知时间”。
+4. 不因时间格式错误导致页面崩溃。
+
+十七、安全要求
+
+1. 用户输入、Session 标题、LLM 回答全部使用 textContent。
+2. 禁止使用 eval、new Function。
+3. 禁止把动态文本拼接到 innerHTML。
+4. 如果使用 innerHTML 构建固定模板，动态数据必须单独通过 textContent 填入。
+5. 不在前端存储 API Key。
+6. 不把 .env 内容传给浏览器。
+7. 不打印 Authorization。
+8. fetch 错误日志不能包含敏感响应。
+9. 不允许 Session A 的响应显示到 Session B。
+10. 所有删除操作必须带 user_id。
+
+十八、视觉设计
+
+设计成现代、简洁的 Agent 开发演示界面。
+
+建议：
+
+- 浅色背景
+- 清晰的卡片层级
+- 左侧深浅对比明显
+- user 和 assistant 气泡风格不同
+- 状态徽章
+- 加载动画
+- 按钮 hover、focus、disabled 状态
+- 最大内容宽度合理
+- 使用系统字体
+- 不依赖网络字体
+- 支持 prefers-reduced-motion
+- 键盘 focus 明显
+- CSS 变量管理颜色和间距
+
+不要过度花哨，不要做成普通后台管理模板。
+
+十九、测试
+
+新增：
+
+tests/test_web_ui.py
+
+由于本阶段不增加浏览器自动化依赖，使用 pytest 检查静态资源和 FastAPI 静态访问。
+
+至少覆盖：
+
+1. GET / 返回 200。
+2. 首页 Content-Type 为 text/html。
+3. 首页包含 app-title。
+4. 首页包含 user-id-input。
+5. 首页包含 session-list。
+6. 首页包含 new-session-button。
+7. 首页包含 message-list。
+8. 首页包含 message-input。
+9. 首页包含 send-button。
+10. 首页使用 type=module。
+11. app.js 可以通过静态路径访问。
+12. api.js 可以访问。
+13. state.js 可以访问。
+14. styles.css 可以访问。
+15. JavaScript 中包含 /api/health。
+16. JavaScript 中包含 /api/sessions。
+17. JavaScript 中包含 /api/chat。
+18. 页面不包含真实 API Key。
+19. 页面不加载外部 CDN。
+20. HTML 中没有内联 onclick。
+21. message-input 有 aria-label 或 label。
+22. 按钮具有可访问名称。
+23. 静态 JS 中不使用 eval。
+24. 静态 JS 中不使用 new Function。
+25. localStorage key 使用 minimal-agent 前缀。
+26. 不把 message 内容保存到 localStorage。
+27. 现有健康检查仍正常。
+28. 现有 API 测试全部通过。
+29. 现有全部测试继续通过。
+
+测试不要调用真实 LLM。
+
+二十、手动验收脚本
+
+新增：
+
+docs/WEB_UI_CHECKLIST.md
+
+内容至少包括：
+
+1. 启动服务。
+2. 打开浏览器。
+3. 创建 weather-window。
+4. 创建 report-window。
+5. weather-window 发送：
+   查询东京天气并添加“出门带伞”。
+6. report-window 发送：
+   添加“周五前完成周报”。
+7. 来回切换两个窗口。
+8. 验证消息没有串线。
+9. 刷新页面。
+10. 验证选中窗口恢复。
+11. 验证历史仍存在。
+12. 重命名窗口。
+13. 删除窗口。
+14. 模拟后端停止时错误提示。
+15. 检查移动端窄屏。
+16. 检查 Enter 与 Shift+Enter。
+17. 检查消息中的 HTML 不会执行。
+18. 记录适合最终录屏的步骤。
+
+二十一、README 和开发文档
+
+README 增加：
+
+1. Web UI 功能。
+2. 启动方式：
+
+python -m uvicorn app.main:app --reload
+
+3. 浏览器地址：
+
+http://127.0.0.1:8000/
+
+4. 多 Session 使用流程。
+5. 用户 ID 只是演示隔离标识，不是真实登录鉴权。
+6. 前端不会保存 API Key。
+7. localStorage 只保存用户 ID 和界面选择。
+8. 9B 将加入 Trace 和 Todo 面板。
+
+将完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+更新：
+
+docs/PROBLEM_SOLVING.md
+
+记录：
+
+1. 为什么使用原生 JavaScript。
+2. 为什么不用前端框架。
+3. 前端状态如何管理。
+4. 如何避免 Session 响应串线。
+5. 为什么聊天内容不写 localStorage。
+6. 如何处理乐观消息。
+7. 如何避免 XSS。
+8. 为什么 Chat 前必须选择 Session。
+9. 如何展示 Agent 加载状态。
+10. 9B 如何增加 Trace 和 Todo 面板。
+
+二十二、限制
+
+1. 不实现完整 Trace 面板。
+2. 不实现完整 Todo 面板。
+3. 不修改 Agent Runtime。
+4. 不修改工具 Schema。
+5. 不修改 SQLiteStore 核心行为。
+6. 不增加 npm。
+7. 不增加外部 CDN。
+8. 不执行 git commit。
+9. 不执行 git push。
+
+二十三、完成后
+
+1. 运行：
+
+python -m pytest tests/test_web_ui.py -q
+
+2. 运行完整测试：
+
+python -m pytest -q
+
+3. 修复所有失败。
+4. 启动 FastAPI。
+5. 在浏览器手动验证两个窗口。
+6. 列出创建和修改文件。
+7. 说明前端状态流转。
+8. 不执行 git commit。
+9. 不执行 git push。
+````

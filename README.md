@@ -39,6 +39,33 @@ python -m uvicorn app.main:app --reload
 Open http://127.0.0.1:8000 in a browser. The health check is available at
 http://127.0.0.1:8000/api/health.
 
+## Web UI
+
+The FastAPI service now serves a native HTML, CSS, and JavaScript multi-Session
+chat interface at http://127.0.0.1:8000/. Start it with:
+
+```bash
+python -m uvicorn app.main:app --reload
+```
+
+The main flow is:
+
+1. Keep the default `demo-user` or apply another demonstration user ID.
+2. Create an explicitly named Session; Chat never creates one implicitly.
+3. Select a Session, send a message, and let the Agent decide whether a tool is
+   needed.
+4. Switch between Sessions to verify that their persisted histories stay
+   isolated, then rename, clear, or delete them as needed.
+
+The user ID is only an isolation identifier for this local demonstration. It is
+not login or authentication. The browser never stores an API key, messages,
+Todos, or Trace data. `localStorage` contains only the selected user ID, active
+Session ID, and collapsed-sidebar preference; conversation history always comes
+from the backend.
+
+Stage 9B will add the complete Trace timeline and Todo management panels. This
+stage shows only compact LLM/tool/Context statistics beneath assistant messages.
+
 ## LLM configuration
 
 Create a private `.env` file from the example in Windows CMD:

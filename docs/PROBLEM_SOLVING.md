@@ -382,3 +382,16 @@
   messages and Todos, post Chat turns, then use returned `run_id` to open a
   lazy Trace timeline. The same composite user/Session identifiers preserve
   isolation across every endpoint.
+
+## 2026-07-13: Stage 09A — 原生多 Session Web UI
+
+- 为什么使用原生 JavaScript：当前界面只有一个页面、少量后端资源和明确的交互边界。ES Modules、`fetch`、`dialog` 与 DOM API 已能覆盖需求，同时保持 FastAPI 直接托管静态文件的零构建流程。
+- 为什么不用前端框架：框架会引入 Node、包管理、构建产物与额外升级面。本阶段重点是验证 Agent 的多 Session 主流程，不需要组件生态或客户端路由带来的复杂度。
+- 前端状态如何管理：`state.js` 集中保存当前用户、Session 列表、选中项、消息和加载状态；`app.js` 负责事件与渲染；`api.js` 只处理 HTTP 契约。页面不会把 DOM 当成业务状态源。
+- 如何避免 Session 响应串线：每次消息加载都有递增请求版本，Chat 请求则捕获发送时的 `user_id + session_id`。响应返回后必须同时匹配当前用户和当前 Session，才允许写入可见消息区。
+- 为什么聊天内容不写 localStorage：后端 SQLite 才是完整历史的唯一来源。浏览器只保存用户 ID、选中 Session 和侧栏偏好，避免本地副本陈旧、越界展示或残留敏感对话。
+- 如何处理乐观消息：发送时只插入一条标记为 pending 的真实用户输入，不伪造助手答复。成功后用后端返回的 user/assistant 消息替换它；失败时保留输入框内容并将 pending 气泡标为失败。
+- 如何避免 XSS：所有 Session 标题、消息、错误与元数据均通过 `textContent` 写入；动态列表使用 `createElement`，不拼接 HTML，不使用 `eval`、`new Function` 或内联事件。
+- 为什么 Chat 前必须选择 Session：后端明确拒绝隐式创建，且所有历史、Todo 和 Trace 都以 `user_id + session_id` 为隔离边界。显式选中可避免拼写错误产生意外数据归属。
+- 如何展示 Agent 加载状态：发送期间禁用重复提交和删除操作，同时显示“Agent 正在思考和调用工具”；历史加载使用独立骨架。成功消息仅展示紧凑的 LLM、工具和 Context 压缩统计，不展示推理正文。
+- 9B 如何增加 Trace 和 Todo 面板：可复用当前 active Session 与 `lastRunId`，按需请求 Trace/Todo API，在聊天主区域旁增加惰性面板；现有 API、状态与 ownership 快照边界无需修改 Agent Runtime。
