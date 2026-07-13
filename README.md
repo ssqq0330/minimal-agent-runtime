@@ -6,7 +6,8 @@ Build a minimal, self-managed Agent runtime step by step without using an Agent
 framework. The project currently includes tools, an OpenAI-compatible HTTP
 client, a structured Agent output parser, a core Agent Runtime loop, SQLite
 storage for Sessions/messages/Todos, persisted Session conversations, and
-manual real-service demos.
+manual real-service demos. Its Session service now automatically runs recalled
+history through the independently testable basic Context manager.
 
 ## Technology stack
 
@@ -21,8 +22,9 @@ manual real-service demos.
 The current milestone runs the basic Agent loop: it asks the LLM for a
 structured decision, executes requested registered tools, returns real tool
 results to the model, and stops when the model produces a final answer. A
-standalone Session service now loads persisted natural-language history into
-the Runtime and atomically saves each successful user/assistant exchange.
+standalone Session service now loads and bounds persisted natural-language
+history before the Runtime call, then atomically saves each successful
+user/assistant exchange.
 
 ## Run locally
 
@@ -147,27 +149,27 @@ the correct `ToolContext`, runs the Agent, and saves the successful exchange.
 remains independently testable and reusable with other storage backends.
 
 ```text
-用户输入
+SQLite 完整历史
   ↓
-根据 user_id + session_id 加载历史
+history_limit 数据库召回上限
   ↓
-转换为 user/assistant messages
+BasicContextManager
+  ↓
+较早摘要 + 最近原始消息
   ↓
 AgentRuntime Loop
   ↓
 得到 final
   ↓
-原子保存 user + assistant
+原子保存本轮真实 user + assistant
 ```
 
-The next Runtime invocation recalls only the user's natural-language messages
-and the assistant's final natural-language answers. Assistant metadata keeps a
-compact operational summary: call counts, unique tool names, stop reason, and
-short `reasoning_summary` values. System prompts, raw tool-call JSON, tool
-results, complete Runtime messages, request headers, API keys, and raw HTTP
-responses are not recalled or stored in that metadata. This keeps context from
-growing rapidly and prevents stale tool results from influencing a new tool
-decision.
+The database retains the complete natural-language conversation. Generated
+Context summaries exist only for one Runtime invocation and are never written
+back to the messages table. Assistant metadata keeps compact Agent and Context
+statistics, but never the summary text or compressed messages. System prompts,
+raw tool-call JSON, tool results, complete Runtime messages, request headers,
+API keys, and raw HTTP responses are not recalled or stored in that metadata.
 
 The current Session layer supports:
 
@@ -176,7 +178,9 @@ The current Session layer supports:
 - isolated Sessions for one user;
 - isolation between different users;
 - continuing after Store/Runtime/Service recreation; and
-- persistent Session-scoped Todos.
+- persistent Session-scoped Todos;
+- Runtime maximum-step protection; and
+- automatic basic Context compression.
 
 After configuring `.env`, run the real two-window persistence demo:
 
@@ -187,6 +191,62 @@ python -m scripts.session_memory_demo
 The demo uses only `data/session-demo.db`, recreates the application stack
 between turns, and verifies that its two windows retain separate Todo lists.
 It never deletes `data/agent.db`.
+
+## Basic Context management
+
+Long-running conversations cannot safely send every stored message to an LLM
+forever: requests become larger, slower, and eventually exceed the model's
+Context limit. `SessionAgentService` now passes every recalled history window
+through `BasicContextManager` before calling the Runtime.
+
+Compression starts when either the normalized history has more than
+`max_messages` messages or its estimated size is greater than `max_chars`.
+The estimate adds each message's role length, content length, and a small fixed
+structural allowance. It is a character-level approximation, not exact Token
+counting from a model tokenizer.
+
+When neither threshold is exceeded, normalized messages are returned in their
+original order. When either threshold is exceeded, the manager:
+
+- converts older messages into one deterministic `assistant` message beginning
+  with `【较早会话摘要】`;
+- keeps the configured number of most recent original messages in old-to-new
+  order; and
+- shortens the summary first, then older retained messages, if the combined
+  result still exceeds the approximate character budget.
+
+Only `role` and trimmed natural-language `content` enter the result. Extra
+dictionary fields and `MessageRecord.metadata` are ignored, so
+`reasoning_summary`, `used_tools`, historical tool results, Runtime messages,
+raw LLM HTTP responses, request headers, and API keys stored outside natural
+message content do not enter Context.
+
+`history_limit` and the Context thresholds have distinct roles. The former is
+the maximum number of recent database messages recalled; `max_messages` and
+`max_chars` decide whether that recalled window is compressed. The fixed order
+is full SQLite history → `history_limit` → Context compression. Neither limit
+deletes or rewrites database history, and the current `user_input` is appended
+by `AgentRuntime` after the built history rather than included in compression.
+
+After configuring `.env`, run the real compression demonstration with:
+
+```bash
+python -m scripts.context_compression_demo
+```
+
+It seeds 24 natural-language messages in `data/context-demo.db`, forces basic
+compression, performs one real LLM request, prints the Context statistics, and
+verifies that no generated summary was persisted. It never deletes
+`data/agent.db`.
+
+On macOS, manually run the focused and complete test suites with:
+
+```bash
+source .venv/bin/activate
+python -m pytest -q tests/test_context_manager.py
+python -m pytest -q tests/test_session_context_integration.py
+python -m pytest -q
+```
 
 ## Current architecture
 
@@ -212,6 +272,5 @@ AgentDecision(final/tool_call)
      Return result to LLM and continue
 ```
 
-Context summary compression, HTTP Chat/Session routes, the multi-window web UI,
-long-term user memory, and independent persistent traces remain future
-milestones.
+HTTP Chat/Session routes, the multi-window web UI, long-term user memory, and
+independent persistent traces remain future milestones.

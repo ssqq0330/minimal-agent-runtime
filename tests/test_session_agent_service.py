@@ -221,7 +221,16 @@ def test_assistant_metadata_is_compact_and_secret_free(store: SQLiteStore) -> No
             "stopped_reason": "final",
             "used_tools": [],
             "reasoning_summaries": ["reason mentions [REDACTED]"],
-        }
+        },
+        "context": {
+            "compressed": False,
+            "original_message_count": 0,
+            "output_message_count": 0,
+            "summarized_message_count": 0,
+            "retained_recent_count": 0,
+            "original_char_count": 0,
+            "output_char_count": 0,
+        },
     }
     assert secret not in serialized
     assert "system_prompt" not in serialized

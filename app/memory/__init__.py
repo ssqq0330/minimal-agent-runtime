@@ -1,5 +1,13 @@
 """Public exports for persistence and context modules."""
 
+from app.memory.context import (
+    BasicContextManager,
+    ContextBuildResult,
+    ContextCompressionError,
+    ContextConfig,
+    estimate_messages_chars,
+)
+
 from app.memory.store import (
     DuplicateSessionError,
     MemoryStoreError,
@@ -20,4 +28,9 @@ __all__ = [
     "SessionNotFoundError",
     "TodoNotFoundError",
     "DuplicateSessionError",
+    "ContextConfig",
+    "ContextBuildResult",
+    "ContextCompressionError",
+    "BasicContextManager",
+    "estimate_messages_chars",
 ]

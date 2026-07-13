@@ -3505,3 +3505,1112 @@ docs/AI_PROMPTS.md
 9. 不执行 git commit。
 10. 不执行 git push。
 ```
+
+## 2026-07-13: Stage 06A — Independent Context manager
+
+Full prompt:
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、JSON 解析器与 Prompt
+stage-04：自行实现 Agent Runtime Loop
+stage-05a：SQLite Session、消息和 Todo 持久化
+stage-05b：Session 历史召回、多窗口隔离、重启后续聊
+
+当前完整测试为 336 passed。
+
+现在开始第六阶段第一部分：实现独立的 Context 管理器和基础压缩算法。
+
+本阶段只实现 app/memory/context.py 及其测试。
+
+暂时不要：
+
+- 修改 SessionAgentService
+- 修改 AgentRuntime
+- 调用真实 LLM API
+- 使用 LLM 生成摘要
+- 实现 HTTP API
+- 修改网页
+- 实现 Trace 数据库
+- 执行 git commit
+- 执行 git push
+
+项目使用 Python 3.11，但代码保持兼容 Python 3.10。
+
+禁止使用 LangChain、LangGraph、OpenAI Agents SDK 或其他 Agent 框架。
+不增加 tokenizer 等第三方依赖。
+
+一、设计目标
+
+持续对话会让历史消息越来越长。
+
+本阶段实现一个基础 Context 管理器，负责：
+
+1. 接收当前 Session 的历史 user/assistant 消息。
+2. 判断历史是否超过消息数量或字符长度限制。
+3. 未超过限制时，原样返回历史。
+4. 超过限制时：
+   - 将较早消息压缩成一个基础摘要消息
+   - 保留最近若干条原始消息
+5. 尽量保证最终 Context 不超过最大字符数。
+6. 不修改调用者传入的原始历史。
+7. 不把 metadata、reasoning_summary、工具 Trace 放入 Context。
+8. 不使用 LLM 生成摘要，使用确定性的基础规则压缩。
+
+二、实现位置
+
+主要实现：
+
+app/memory/context.py
+
+更新：
+
+app/memory/__init__.py
+
+新增：
+
+tests/test_context_manager.py
+
+三、ContextConfig
+
+在 app/memory/context.py 中实现 ContextConfig 数据类。
+
+字段：
+
+- max_messages: int = 20
+- recent_messages: int = 8
+- max_chars: int = 12000
+- summary_max_chars: int = 4000
+- per_message_chars: int = 500
+
+含义：
+
+max_messages：
+超过该消息数量时触发压缩。
+
+recent_messages：
+压缩后保留最近多少条原始消息。
+
+max_chars：
+最终 Context 的近似最大字符数。
+
+summary_max_chars：
+基础摘要文本最大字符数。
+
+per_message_chars：
+每条旧消息进入摘要前允许保留的最大字符数。
+
+校验规则：
+
+1. 所有字段必须是整数。
+2. bool 不能作为合法整数。
+3. 所有字段必须大于 0。
+4. recent_messages 必须小于或等于 max_messages。
+5. summary_max_chars 必须小于 max_chars。
+6. per_message_chars 必须小于或等于 summary_max_chars。
+7. 参数错误抛出 ValueError。
+8. 错误信息清晰。
+
+四、ContextBuildResult
+
+实现 ContextBuildResult 数据类。
+
+字段至少包含：
+
+- messages: list[dict[str, str]]
+- compressed: bool
+- original_message_count: int
+- output_message_count: int
+- summarized_message_count: int
+- retained_recent_count: int
+- original_char_count: int
+- output_char_count: int
+- summary_text: str | None = None
+
+提供：
+
+to_dict() -> dict[str, Any]
+
+要求：
+
+1. messages 是最终可传给 AgentRuntime 的 history。
+2. compressed 表示本次是否发生压缩。
+3. summary_text 未压缩时为 None。
+4. 不能包含 metadata。
+5. 不能包含 API Key 或 HTTP 请求信息。
+
+五、基础 Context 管理器
+
+实现：
+
+BasicContextManager(
+    config: ContextConfig | None = None
+)
+
+config 为 None 时使用默认配置。
+
+实现：
+
+build(
+    history: list[MessageRecord | dict[str, Any]]
+) -> ContextBuildResult
+
+为了避免循环导入，可以合理使用 TYPE_CHECKING 或只通过属性读取 MessageRecord。
+
+六、输入标准化
+
+history 必须满足：
+
+1. 必须是 list。
+2. 每项可以是：
+   - MessageRecord
+   - dict
+3. 每项必须能提取：
+   - role
+   - content
+4. role 只允许：
+   - user
+   - assistant
+5. content 必须是非空字符串。
+6. 去除 content 首尾空白后不能为空。
+7. dict 中的其他字段全部忽略。
+8. MessageRecord 的 metadata 不进入结果。
+9. 返回统一格式：
+
+{
+  "role": "user",
+  "content": "..."
+}
+
+10. 不修改原始 dict、MessageRecord 或 history list。
+11. 空 history 合法，返回空 messages。
+12. 错误使用清晰的 ValueError 或 ContextCompressionError。
+
+定义：
+
+ContextCompressionError
+
+继承 ValueError。
+
+七、字符长度估算
+
+实现公开函数：
+
+estimate_messages_chars(
+    messages: list[dict[str, str]]
+) -> int
+
+基础估算方式可以使用：
+
+每条消息的 role 长度
++ content 长度
++ 少量固定结构开销
+
+例如每条增加 12 个字符作为 JSON 或消息结构开销。
+
+不要求精确 Token 计数。
+
+README 中必须说明：
+
+这是字符级近似控制，不是模型 tokenizer 的精确 Token 统计。
+
+八、压缩触发条件
+
+以下任一条件满足时触发压缩：
+
+1. 消息数量大于 max_messages。
+2. estimate_messages_chars(history) 大于 max_chars。
+
+否则：
+
+1. 原样返回标准化后的消息。
+2. compressed=False。
+3. summarized_message_count=0。
+4. retained_recent_count 等于原消息数。
+5. summary_text=None。
+
+九、压缩策略
+
+压缩时：
+
+1. 优先保留最后 recent_messages 条消息。
+2. 更早的消息作为 older_messages。
+3. older_messages 被压缩成一个确定性的摘要文本。
+4. 摘要作为最终 history 的第一条消息。
+5. 最近原始消息放在摘要后面。
+6. 最近消息顺序必须保持旧到新。
+7. 最终顺序：
+
+[
+  {
+    "role": "assistant",
+    "content": "【较早会话摘要】..."
+  },
+  ...最近消息
+]
+
+使用 assistant role 是因为现有 AgentRuntime 的 history 只接受 user 和 assistant，不接受额外 system 消息。
+
+摘要必须明确标识为历史摘要，避免模型误以为是当前回答。
+
+十、基础摘要格式
+
+摘要建议格式：
+
+【较早会话摘要】
+以下内容由系统根据较早的对话记录压缩生成，仅用于延续上下文：
+
+1. 用户：用户较早的消息
+2. 助手：助手较早的最终回答
+3. 用户：另一条消息
+
+要求：
+
+1. 用户角色显示为“用户”。
+2. assistant 显示为“助手”。
+3. 按原始时间顺序生成。
+4. 每条内容先去除首尾空白。
+5. 每条内容最长保留 per_message_chars。
+6. 内容超过限制时添加：
+
+……[已截断]
+
+7. 摘要总长度不得超过 summary_max_chars。
+8. 摘要超过限制时在结尾添加：
+
+……[较早历史已进一步压缩]
+
+9. 中文不能被转义为 Unicode 编码。
+10. 摘要不能包含 MessageRecord.metadata。
+11. 摘要不能包含 reasoning_summary、used_tools 或 Runtime messages，除非这些文本本身就是用户自然语言内容。
+12. 不虚构历史中不存在的信息。
+13. 不改变数字、Todo 内容、城市名称等关键信息。
+
+十一、最终长度控制
+
+压缩后需要尽量保证：
+
+output_char_count <= max_chars
+
+处理顺序：
+
+1. 先生成摘要。
+2. 保留最近 recent_messages 条消息。
+3. 如果仍超过 max_chars：
+   - 先进一步缩短摘要
+4. 如果摘要已经缩到最小仍超限：
+   - 从最近消息中最旧的一条开始做内容截断
+5. 尽量保留越新的消息越完整。
+6. 最后一条历史消息应优先完整保留。
+7. 不允许产生空 content。
+8. 截断时添加：
+
+……[为控制上下文长度已截断]
+
+9. 如果 max_chars 小到无法完整容纳结构标记，也要返回合法的非空消息，而不是崩溃。
+10. output_char_count 必须使用 estimate_messages_chars 重新计算。
+11. 输出 messages 中 role 和 content 必须始终合法。
+
+注意：
+
+本阶段只要求基础、确定性的字符控制，不要求复杂语义摘要。
+
+十二、重复压缩保护
+
+如果输入历史第一条已经是本项目生成的摘要消息，内容以：
+
+【较早会话摘要】
+
+开头，则不要把摘要的说明文字无限嵌套。
+
+再次压缩时：
+
+1. 可以把旧摘要视为已有历史信息。
+2. 新摘要中最多保留一层“较早会话摘要”标题。
+3. 不能出现多个连续嵌套标题，例如：
+   - 【较早会话摘要】
+   - 【较早会话摘要】
+4. 多次 build 后，摘要结构应保持稳定、可读。
+
+十三、公开辅助方法
+
+可以实现：
+
+normalize_history(...)
+build_summary(...)
+truncate_text(...)
+
+但保持接口简单。
+
+至少公开：
+
+- ContextConfig
+- ContextBuildResult
+- ContextCompressionError
+- BasicContextManager
+- estimate_messages_chars
+
+十四、模块导出
+
+更新 app/memory/__init__.py，导出：
+
+- ContextConfig
+- ContextBuildResult
+- ContextCompressionError
+- BasicContextManager
+- estimate_messages_chars
+
+保留已有：
+
+- SQLiteStore
+- SessionRecord
+- MessageRecord
+- TodoRecord
+
+十五、测试
+
+新增：
+
+tests/test_context_manager.py
+
+至少覆盖：
+
+配置校验：
+
+1. 默认配置合法。
+2. max_messages=0 失败。
+3. max_messages=True 失败。
+4. recent_messages=0 失败。
+5. recent_messages 大于 max_messages 失败。
+6. max_chars=0 失败。
+7. summary_max_chars 大于等于 max_chars 失败。
+8. per_message_chars 大于 summary_max_chars 失败。
+9. 非整数配置失败。
+
+输入：
+
+10. 空历史正常。
+11. history 不是 list 失败。
+12. dict 消息正常。
+13. MessageRecord 正常。
+14. 消息项类型错误失败。
+15. role 缺失失败。
+16. role 非法失败。
+17. content 缺失失败。
+18. content 非字符串失败。
+19. content 为空失败。
+20. 不修改原 history。
+21. 不修改原 dict。
+22. metadata 不进入结果。
+
+不压缩：
+
+23. 消息数和字符数都未超限时不压缩。
+24. messages 内容保持一致。
+25. 原始顺序保持一致。
+26. summary_text 为 None。
+27. summarized_message_count 为 0。
+28. retained_recent_count 正确。
+29. output_char_count 正确。
+
+按消息数压缩：
+
+30. 超过 max_messages 时触发压缩。
+31. 摘要位于第一条。
+32. 摘要 role 为 assistant。
+33. 摘要包含“较早会话摘要”。
+34. 保留最后 recent_messages 条。
+35. 最近消息顺序保持不变。
+36. summarized_message_count 正确。
+37. retained_recent_count 正确。
+
+按字符数压缩：
+
+38. 消息数量未超限但字符超限时压缩。
+39. 最终字符数尽量不超过 max_chars。
+40. 最后一条消息优先保留。
+41. 较旧消息优先被截断。
+
+摘要：
+
+42. 摘要包含用户角色标签。
+43. 摘要包含助手角色标签。
+44. 中文正常保留。
+45. Todo 内容正常保留。
+46. 城市名称正常保留。
+47. 单条旧消息超过 per_message_chars 时截断。
+48. 摘要超过 summary_max_chars 时截断。
+49. 截断标记存在。
+50. 不虚构不存在的信息。
+51. metadata 中的 reasoning_summary 不进入摘要。
+52. metadata 中的 used_tools 不进入摘要。
+53. metadata 中的 API Key 不进入摘要。
+
+极端长度：
+
+54. 最近消息过长时可以截断。
+55. 输出内容不为空。
+56. role 始终合法。
+57. output_char_count 与实际估算一致。
+58. max_chars 很小时不会死循环。
+59. 不会出现负数统计。
+60. 输入只有一条超长消息时可以处理。
+
+重复压缩：
+
+61. 已有摘要再次压缩不会出现嵌套标题。
+62. 多次 build 后最多有一个摘要消息。
+63. 新的最近消息仍保留。
+64. 摘要结构保持可读。
+
+结果对象：
+
+65. ContextBuildResult.to_dict 正确。
+66. to_dict 不包含原始 MessageRecord 对象。
+67. to_dict 可以 JSON 序列化。
+68. estimate_messages_chars 对空列表返回 0。
+69. estimate_messages_chars 对正常消息返回正整数。
+70. estimate_messages_chars 不修改输入。
+
+要求：
+
+1. 测试之间相互隔离。
+2. 不调用真实 LLM。
+3. 不依赖 .env。
+4. 不污染数据库。
+5. 保留全部现有测试。
+6. 修复全部失败。
+
+十六、README
+
+更新 README，增加 Context 管理说明：
+
+1. 为什么持续对话需要 Context 控制。
+2. 当前使用字符数近似，不是精确 Token 计数。
+3. 触发条件：
+   - 消息数量
+   - 字符长度
+4. 基础压缩策略：
+   - 较早历史生成规则摘要
+   - 最近消息原样保留
+5. 不进入 Context 的内容：
+   - metadata
+   - reasoning_summary
+   - 历史工具结果
+   - 原始 LLM HTTP 响应
+6. 当前阶段尚未接入 SessionAgentService。
+7. 下一阶段会在每次 Session 对话召回时自动执行 Context 构建。
+
+十七、开发文档
+
+将本阶段完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+在 docs/PROBLEM_SOLVING.md 中记录：
+
+1. 为什么不直接把全部历史塞给 LLM。
+2. 为什么先使用字符数近似而不是 tokenizer。
+3. 为什么基础压缩不调用 LLM。
+4. 为什么保留最近消息。
+5. 为什么摘要使用 assistant role。
+6. 为什么 metadata 不进入 Context。
+7. 如何避免摘要重复嵌套。
+8. 极端长消息如何处理。
+9. 基础压缩的局限性。
+10. 下一阶段如何接入 SessionAgentService。
+
+十八、限制
+
+1. 不修改 SessionAgentService。
+2. 不修改 AgentRuntime。
+3. 不修改 SQLiteStore 的公开行为。
+4. 不修改工具。
+5. 不修改 LLM Client。
+6. 不增加第三方依赖。
+7. 不调用真实 API。
+8. 不实现网页。
+9. 不执行 git commit。
+10. 不执行 git push。
+
+十九、完成后
+
+1. 运行完整测试。
+2. 单独运行 Context 测试。
+3. 修复全部失败。
+4. 列出创建和修改文件。
+5. 说明压缩触发条件。
+6. 说明最终 Context 的组成。
+7. 给出 Mac 终端下的手动测试命令。
+8. 不执行 git commit。
+9. 不执行 git push。
+```
+
+## 2026-07-13: Stage 06B — Session Context integration
+
+Full prompt:
+
+```text
+当前项目已经完成：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、JSON 解析器与 Prompt
+stage-04：自行实现 Agent Runtime Loop
+stage-05：SQLite Session、消息和 Todo 持久化，以及 Session 历史续聊
+stage-06A：BasicContextManager 基础 Context 压缩
+
+当前完整测试结果为：
+
+379 passed
+
+现在完成第六阶段第二部分：将 BasicContextManager 自动接入 SessionAgentService。
+
+本阶段不要实现：
+
+- FastAPI Chat API
+- 网页界面
+- 独立 Trace 数据库
+- LLM 摘要
+- 精确 Tokenizer
+- 长期用户画像 Memory
+- git commit
+- git push
+
+项目使用 Python 3.11，同时保持 Python 3.10 兼容。
+
+禁止使用 LangChain、LangGraph、OpenAI Agents SDK、OpenHands、OpenClaw 或其他 Agent 框架。
+
+一、总体目标
+
+当前 SessionAgentService 的流程是：
+
+从 SQLite 加载历史
+→ 转换成 history
+→ 交给 AgentRuntime
+
+现在改为：
+
+从 SQLite 加载原始历史
+→ BasicContextManager.build()
+→ 得到压缩后的 Context
+→ 交给 AgentRuntime
+→ 保存最终 user/assistant 消息
+
+必须保持：
+
+1. 数据库中保存完整的自然语言 user/assistant 历史。
+2. 压缩摘要不写回 messages 表。
+3. 每次请求时根据完整历史重新构建 Context。
+4. AgentRuntime 仍然保持无状态。
+5. 历史工具结果、metadata、reasoning_summary 不进入 Context。
+6. 不修改以前保存的消息。
+7. 不影响多用户、多 Session 隔离。
+8. Runtime 失败时仍然不能保存本轮消息。
+
+二、修改 SessionAgentService
+
+修改：
+
+app/agent/session_service.py
+
+构造方法调整为：
+
+SessionAgentService(
+    runtime: AgentRuntime,
+    store: SQLiteStore,
+    history_limit: int | None = None,
+    context_manager: BasicContextManager | None = None
+)
+
+规则：
+
+1. context_manager 为 None 时，自动创建默认 BasicContextManager()。
+2. 传入 context_manager 时必须是 BasicContextManager。
+3. 类型错误抛出 TypeError。
+4. 初始化时不访问数据库。
+5. 初始化时不调用 LLM。
+6. 保留现有 history_limit 行为。
+7. 不修改 AgentRuntime 的公开接口。
+8. 不负责关闭 LLM Client。
+
+三、chat 流程
+
+chat(user_id, session_id, user_input) 的新执行顺序：
+
+1. 校验输入。
+2. 检查 Session 存在。
+3. 使用 SQLiteStore.list_messages 加载原始历史。
+4. history_limit 不为 None 时，仍然只加载最近 N 条数据库消息。
+5. 将 MessageRecord 列表直接交给：
+
+context_manager.build(raw_history)
+
+6. 得到 ContextBuildResult。
+7. 将：
+
+context_result.messages
+
+作为 AgentRuntime.run 的 history。
+
+8. 创建正确的 ToolContext。
+9. 执行 AgentRuntime。
+10. Runtime 成功返回 final 后，使用 add_exchange 原子保存：
+    - 当前 user_input
+    - 最终 assistant answer
+11. Context 摘要不能作为数据库消息保存。
+12. Runtime 失败时不写入本轮任何消息。
+13. loaded_history_count 继续表示从数据库加载的原始消息数量，而不是压缩后的数量。
+
+四、SessionChatResult
+
+在保持现有接口兼容的基础上，为 SessionChatResult 增加：
+
+context_result: ContextBuildResult | None = None
+
+要求：
+
+1. SessionAgentService.chat 正常返回时必须提供 context_result。
+2. 增加便捷属性：
+
+context_compressed -> bool
+context_message_count -> int
+
+3. context_compressed 在 context_result 为 None 时返回 False。
+4. context_message_count 在 context_result 为 None 时返回 loaded_history_count。
+5. to_dict 中增加紧凑的 context 字段：
+
+{
+  "compressed": true,
+  "original_message_count": 24,
+  "output_message_count": 5,
+  "summarized_message_count": 20,
+  "retained_recent_count": 4,
+  "original_char_count": 5000,
+  "output_char_count": 1100
+}
+
+6. to_dict 不应包含：
+   - context_result.messages 的完整副本
+   - summary_text 全文
+   - MessageRecord 原始对象
+7. 尽量保持旧的 to_dict 字段不变。
+8. 保证所有原有测试继续通过。
+
+五、assistant metadata
+
+此前 assistant 消息 metadata 中已有：
+
+{
+  "agent": {
+    "total_llm_calls": ...,
+    "total_tool_calls": ...,
+    "stopped_reason": "...",
+    "used_tools": [...],
+    "reasoning_summaries": [...]
+  }
+}
+
+现在在同一 metadata 中增加：
+
+{
+  "context": {
+    "compressed": true,
+    "original_message_count": 24,
+    "output_message_count": 5,
+    "summarized_message_count": 20,
+    "retained_recent_count": 4,
+    "original_char_count": 5000,
+    "output_char_count": 1100
+  }
+}
+
+要求：
+
+1. 只保存统计数据。
+2. 不保存 summary_text。
+3. 不保存压缩后的完整 messages。
+4. 不保存 system Prompt。
+5. 不保存 API Key。
+6. 不保存 Authorization 请求头。
+7. 不保存原始 LLM HTTP 响应。
+8. 未发生压缩时仍保存 compressed=false 和对应统计。
+9. context metadata 不能进入下一轮 LLM Context，因为 BasicContextManager 会忽略 metadata。
+
+六、history_limit 与 ContextManager 的关系
+
+执行顺序必须固定：
+
+SQLite 全部历史
+→ 先应用 history_limit
+→ 再交给 BasicContextManager
+
+例如：
+
+数据库有 100 条消息
+history_limit=20
+ContextConfig.max_messages=10
+
+则：
+
+1. 从数据库加载最近 20 条。
+2. loaded_history_count=20。
+3. ContextManager 再把 20 条压缩为摘要 + 最近消息。
+4. 数据库仍然保留 100 条。
+
+README 中明确说明：
+
+history_limit 是数据库召回上限；
+ContextManager 是召回后的 Context 压缩。
+
+七、Context 中允许出现的内容
+
+进入 AgentRuntime history 的内容只能是：
+
+- 较早会话摘要
+- 最近 user 自然语言消息
+- 最近 assistant 最终自然语言回答
+
+不允许进入：
+
+- MessageRecord.id
+- created_at
+- user_id
+- session_id
+- metadata
+- reasoning_summary
+- used_tools
+- tool_call JSON
+- 工具结果原文
+- HTTP 响应
+- API Key
+
+八、重复对话和摘要
+
+由于摘要不写入数据库，每次 chat 都从原始数据库消息重新构建。
+
+要求：
+
+1. 数据库中不会不断增加摘要消息。
+2. Session 历史查询仍然只返回真实 user/assistant 消息。
+3. 多次 chat 后不会产生嵌套摘要。
+4. 每轮 Context 最多有一条摘要消息。
+5. 原始历史顺序不变。
+6. 当前 user_input 不参与历史压缩，它由 AgentRuntime 单独追加在压缩历史之后。
+
+九、异常处理
+
+1. BasicContextManager.build 抛出 ContextCompressionError 时：
+   - 不调用 Runtime
+   - 不保存本轮消息
+   - 将异常继续抛出，或转换成清晰的 Session Context 异常
+2. Runtime 失败时：
+   - 不保存消息
+3. SQLite 保存失败时：
+   - 原子回滚
+4. 不使用宽泛 except Exception 吞掉错误。
+5. 错误信息不能包含 API Key。
+
+可以新增：
+
+SessionContextError
+
+但保持设计简单。
+
+十、模块导出
+
+确认 app/agent/__init__.py 继续导出：
+
+- SessionAgentService
+- SessionChatResult
+
+如新增 SessionContextError，也一并导出。
+
+app/memory/__init__.py 中已有的 Context 相关导出必须保留。
+
+十一、测试
+
+新增：
+
+tests/test_session_context_integration.py
+
+测试不能调用真实网络，使用：
+
+- tmp_path SQLite
+- FakeLLMClient
+- 真实 AgentRuntime
+- 真实 BasicContextManager
+- 真实 ToolRegistry
+
+至少覆盖：
+
+初始化：
+
+1. 默认自动创建 BasicContextManager。
+2. 可以注入自定义 BasicContextManager。
+3. context_manager 类型错误失败。
+4. 初始化不调用 LLM。
+5. 初始化不修改数据库。
+
+短历史：
+
+6. 空历史不压缩。
+7. loaded_history_count=0。
+8. context_result.compressed=False。
+9. Runtime 收到当前 user_input。
+10. 成功后保存两条消息。
+11. assistant metadata 包含 context。
+12. context metadata 的 compressed=false。
+
+消息数压缩：
+
+13. 创建超过 max_messages 的历史。
+14. chat 时触发压缩。
+15. Runtime 收到的第一条 history 是摘要。
+16. 摘要 role 为 assistant。
+17. 摘要包含“较早会话摘要”。
+18. Runtime 收到最近消息。
+19. 最近消息顺序正确。
+20. 当前 user_input 位于压缩历史之后。
+21. context_result.compressed=True。
+22. summarized_message_count 正确。
+23. retained_recent_count 正确。
+24. loaded_history_count 仍然是原始加载条数。
+
+字符压缩：
+
+25. 消息数量未超限但字符数超限时触发。
+26. output_char_count 尽量不超过 max_chars。
+27. 最后一条历史消息优先保留。
+28. Runtime 收到合法非空消息。
+
+数据库完整性：
+
+29. 压缩摘要不写入 messages 表。
+30. 数据库只新增当前 user 和 final assistant。
+31. 原来的历史不被修改。
+32. 多轮对话后数据库没有“较早会话摘要”消息。
+33. get_history 返回完整自然语言历史。
+34. 数据库消息数按每轮增加 2。
+35. Context 压缩不删除数据库历史。
+
+metadata 隔离：
+
+36. MessageRecord.metadata 不进入 Runtime history。
+37. reasoning_summary 不进入 Runtime history。
+38. used_tools 不进入 Runtime history。
+39. API Key 风格的 metadata 不进入 Runtime history。
+40. assistant metadata 只保存 Context 统计。
+41. assistant metadata 不保存 summary_text。
+42. assistant metadata 不保存完整 Context messages。
+43. assistant metadata 不保存 system Prompt。
+
+Session 隔离：
+
+44. window-1 的压缩摘要不包含 window-2 内容。
+45. window-2 的压缩摘要不包含 window-1 内容。
+46. 不同用户相同 session_id 仍然隔离。
+47. 一个 Session 压缩不影响另一个 Session 的数据库历史。
+
+Todo 与工具：
+
+48. 压缩后 Todo 工具仍收到正确 user_id。
+49. 压缩后 Todo 工具仍收到正确 session_id。
+50. 带工具的追问可以正常完成。
+51. 历史工具结果仍然不会进入下一轮 Context。
+52. used_tools 继续保存在 assistant metadata。
+
+history_limit：
+
+53. 数据库有 20 条历史，history_limit=6 时只加载最近 6 条。
+54. loaded_history_count=6。
+55. ContextManager 只处理这 6 条。
+56. 数据库实际仍保留全部消息。
+57. 最近 6 条顺序正确。
+58. history_limit 与压缩可以同时生效。
+
+失败行为：
+
+59. ContextCompressionError 时不调用 LLM。
+60. ContextCompressionError 时不新增数据库消息。
+61. AgentLLMError 时不新增数据库消息。
+62. AgentDecisionError 时不新增数据库消息。
+63. AgentMaxStepsError 时不新增数据库消息。
+
+结果对象：
+
+64. SessionChatResult.context_compressed 正确。
+65. SessionChatResult.context_message_count 正确。
+66. SessionChatResult.to_dict 包含紧凑 context 统计。
+67. to_dict 不包含 summary_text 全文。
+68. to_dict 可以 JSON 序列化。
+
+重复调用：
+
+69. 多次 chat 后 Context 中最多一个摘要。
+70. 摘要不会作为真实历史重复保存。
+71. 第二次压缩结构仍然可读。
+72. 新的最近消息仍被完整保留。
+
+要求：
+
+1. 测试相互隔离。
+2. 不调用真实 API。
+3. 不依赖 .env。
+4. 不污染 data/agent.db。
+5. 保留此前所有测试。
+6. 修复全部失败。
+
+十二、真实演示脚本
+
+新增：
+
+scripts/context_compression_demo.py
+
+运行方式：
+
+python -m scripts.context_compression_demo
+
+使用：
+
+data/context-demo.db
+
+脚本流程：
+
+1. 启动时只清理：
+   - context-demo.db
+   - context-demo.db-shm
+   - context-demo.db-wal
+2. 不删除 data/agent.db。
+3. 从 .env 加载真实 LLM 配置。
+4. 创建 Session：
+   - user_id="context-demo-user"
+   - session_id="long-window"
+   - title="长对话压缩演示"
+5. 使用 SQLiteStore.add_exchange 直接写入多轮演示历史，避免为了造历史调用很多次真实 API。
+6. 至少写入 12 轮，即 24 条历史消息。
+7. 较早历史中包含：
+   - 城市是东京
+   - 项目代号是 Atlas
+8. 最近历史中包含：
+   - 最新待办是完成 README
+9. 使用较小配置确保触发压缩，例如：
+
+ContextConfig(
+    max_messages=8,
+    recent_messages=4,
+    max_chars=1600,
+    summary_max_chars=800,
+    per_message_chars=120
+)
+
+10. 创建 SessionAgentService，注入该 ContextManager。
+11. 使用真实 LLM 询问：
+
+根据之前的对话，请告诉我较早提到的城市、项目代号，以及最近的待办是什么。
+
+12. 打印：
+   - Final answer
+   - loaded_history_count
+   - context compressed
+   - original_message_count
+   - output_message_count
+   - summarized_message_count
+   - retained_recent_count
+   - original_char_count
+   - output_char_count
+   - Runtime LLM calls
+   - Runtime tool calls
+13. 打印数据库消息数量。
+14. 验证数据库中不存在 role/content 为压缩摘要的消息。
+15. 不打印 API Key。
+16. 不打印 Authorization 请求头。
+17. 正确关闭 LLM Client。
+18. 失败时非零退出。
+19. 演示数据库必须被 .gitignore 忽略。
+
+十三、README
+
+更新 README，增加：
+
+1. ContextManager 已接入 SessionAgentService。
+2. 每次对话的完整流程：
+
+SQLite 完整历史
+→ history_limit
+→ BasicContextManager
+→ 摘要 + 最近消息
+→ AgentRuntime
+→ 保存本轮真实 user/assistant
+
+3. 说明：
+   - 数据库保存完整历史
+   - 摘要只存在于本次 LLM Context
+   - 摘要不会写回数据库
+4. 区分：
+   - history_limit：数据库召回上限
+   - max_messages/max_chars：Context 压缩阈值
+5. 说明字符长度只是近似，不是精确 Token。
+6. 增加演示命令：
+
+python -m scripts.context_compression_demo
+
+7. 当前已满足：
+   - 最大轮次限制
+   - Session 历史记忆
+   - 纯对话追问
+   - 带工具追问
+   - 多窗口隔离
+   - 基础 Context 压缩
+
+十四、开发文档
+
+将本阶段完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+在 docs/PROBLEM_SOLVING.md 记录：
+
+1. ContextManager 的召回时机。
+2. 为什么先应用 history_limit 再压缩。
+3. 为什么数据库保存完整历史。
+4. 为什么摘要不写回数据库。
+5. 为什么 Context 统计可以写 metadata。
+6. 为什么 summary_text 不写 metadata。
+7. 如何避免摘要重复嵌套。
+8. ContextCompressionError 如何处理。
+9. 压缩后工具调用为什么仍然保持 Session 隔离。
+10. 基础字符压缩的局限性。
+
+十五、限制
+
+1. 不修改 AgentRuntime 公开接口。
+2. 不修改 SQLiteStore 已有公开行为。
+3. 不修改工具 Schema。
+4. 不实现 FastAPI 路由。
+5. 不实现网页。
+6. 不增加第三方依赖。
+7. 不使用 LLM 生成摘要。
+8. 不自动执行 git commit。
+9. 不自动执行 git push。
+
+十六、完成后
+
+1. 运行：
+
+python -m pytest tests/test_session_context_integration.py -q
+
+2. 运行完整测试：
+
+python -m pytest -q
+
+3. 修复全部失败。
+4. 列出创建和修改文件。
+5. 说明完整 Context 构建流程。
+6. 给出真实 Context 演示命令。
+7. 不执行 git commit。
+8. 不执行 git push。
+```

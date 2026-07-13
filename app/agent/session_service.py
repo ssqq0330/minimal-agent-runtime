@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.agent.runtime import AgentRunResult, AgentRuntime
+from app.memory.context import BasicContextManager, ContextBuildResult
 from app.memory.store import (
     MessageRecord,
     SessionNotFoundError,
@@ -24,6 +25,19 @@ class SessionChatResult:
     assistant_message: MessageRecord
     agent_result: AgentRunResult
     loaded_history_count: int
+    context_result: Optional[ContextBuildResult] = None
+
+    @property
+    def context_compressed(self) -> bool:
+        """Whether recalled history was compressed for this Runtime call."""
+        return bool(self.context_result and self.context_result.compressed)
+
+    @property
+    def context_message_count(self) -> int:
+        """Return the number of history messages supplied to the Runtime."""
+        if self.context_result is None:
+            return self.loaded_history_count
+        return self.context_result.output_message_count
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a serializable view suitable for a future HTTP API."""
@@ -33,7 +47,21 @@ class SessionChatResult:
             "assistant_message": self.assistant_message.to_dict(),
             "agent_result": self.agent_result.to_dict(),
             "loaded_history_count": self.loaded_history_count,
+            "context": self._context_stats(),
         }
+
+    def _context_stats(self) -> Dict[str, Any]:
+        if self.context_result is None:
+            return {
+                "compressed": False,
+                "original_message_count": self.loaded_history_count,
+                "output_message_count": self.loaded_history_count,
+                "summarized_message_count": 0,
+                "retained_recent_count": self.loaded_history_count,
+                "original_char_count": 0,
+                "output_char_count": 0,
+            }
+        return _context_stats(self.context_result)
 
 
 class SessionAgentService:
@@ -44,15 +72,26 @@ class SessionAgentService:
         runtime: AgentRuntime,
         store: SQLiteStore,
         history_limit: Optional[int] = None,
+        context_manager: Optional[BasicContextManager] = None,
     ) -> None:
         if not isinstance(runtime, AgentRuntime):
             raise ValueError("runtime must be an AgentRuntime.")
         if not isinstance(store, SQLiteStore):
             raise ValueError("store must be a SQLiteStore.")
+        if context_manager is not None and not isinstance(
+            context_manager,
+            BasicContextManager,
+        ):
+            raise TypeError("context_manager must be a BasicContextManager or None.")
         self._validate_limit(history_limit, "history_limit")
         self.runtime = runtime
         self.store = store
         self.history_limit = history_limit
+        self.context_manager = (
+            context_manager
+            if context_manager is not None
+            else BasicContextManager()
+        )
 
     def chat(
         self,
@@ -66,21 +105,17 @@ class SessionAgentService:
         user_input = self._validate_text(user_input, "user_input")
         self._require_session(user_id, session_id)
 
-        stored_history = self.store.list_messages(
+        raw_history = self.store.list_messages(
             user_id,
             session_id,
             limit=self.history_limit,
         )
-        history = [
-            {"role": message.role, "content": message.content}
-            for message in stored_history
-            if message.role in {"user", "assistant"}
-        ]
+        context_result = self.context_manager.build(raw_history)
         context = ToolContext(user_id=user_id, session_id=session_id)
         agent_result = self.runtime.run(
             user_input=user_input,
             context=context,
-            history=history,
+            history=context_result.messages,
         )
 
         user_message, assistant_message = self.store.add_exchange(
@@ -88,7 +123,10 @@ class SessionAgentService:
             session_id=session_id,
             user_content=user_input,
             assistant_content=agent_result.answer,
-            assistant_metadata=self._build_agent_metadata(agent_result),
+            assistant_metadata=self._build_agent_metadata(
+                agent_result,
+                context_result,
+            ),
         )
         updated_session = self.store.get_session(user_id, session_id)
         if updated_session is None:
@@ -101,7 +139,8 @@ class SessionAgentService:
             user_message=user_message,
             assistant_message=assistant_message,
             agent_result=agent_result,
-            loaded_history_count=len(history),
+            loaded_history_count=len(raw_history),
+            context_result=context_result,
         )
 
     def get_history(
@@ -133,7 +172,10 @@ class SessionAgentService:
         return session
 
     @staticmethod
-    def _build_agent_metadata(agent_result: AgentRunResult) -> Dict[str, Any]:
+    def _build_agent_metadata(
+        agent_result: AgentRunResult,
+        context_result: ContextBuildResult,
+    ) -> Dict[str, Any]:
         used_tools: List[str] = []
         reasoning_summaries: List[str] = []
         for step in agent_result.steps:
@@ -151,7 +193,8 @@ class SessionAgentService:
                 "stopped_reason": agent_result.stopped_reason,
                 "used_tools": used_tools,
                 "reasoning_summaries": reasoning_summaries,
-            }
+            },
+            "context": _context_stats(context_result),
         }
 
     @staticmethod
@@ -169,3 +212,16 @@ class SessionAgentService:
             return
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError("{} must be an integer greater than 0.".format(field_name))
+
+
+def _context_stats(context_result: ContextBuildResult) -> Dict[str, Any]:
+    """Return only safe, compact Context statistics for results and metadata."""
+    return {
+        "compressed": context_result.compressed,
+        "original_message_count": context_result.original_message_count,
+        "output_message_count": context_result.output_message_count,
+        "summarized_message_count": context_result.summarized_message_count,
+        "retained_recent_count": context_result.retained_recent_count,
+        "original_char_count": context_result.original_char_count,
+        "output_char_count": context_result.output_char_count,
+    }

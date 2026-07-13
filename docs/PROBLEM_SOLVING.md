@@ -219,3 +219,87 @@
   estimates, summarize older natural-language turns, and combine that summary
   with recent messages before Runtime execution without changing the Runtime or
   the atomic exchange contract.
+
+## 2026-07-13: Stage 06A — 独立 Context 管理与基础压缩
+
+- Why not send all history: Persisted history grows without a natural upper
+  bound. Sending it all makes each request slower and more expensive and can
+  ultimately exceed a model's Context window, so recall needs a bounded layer
+  even though the database keeps the complete conversation.
+- Why approximate characters first: Character length plus fixed message
+  overhead is deterministic, dependency-free, and works across providers. It
+  is not exact Token counting, but it is sufficient to establish the Context
+  boundary without adding a model-specific tokenizer dependency.
+- Why compression does not call an LLM: A rule-based summary is reproducible,
+  fast, offline-testable, and cannot introduce an extra API failure or charge.
+  Its limited semantic quality is an explicit tradeoff for this first layer.
+- Why recent messages stay original: The newest turns carry the immediate
+  question, references, corrections, and conversational intent. Keeping them
+  in chronological order retains more useful local detail than treating all
+  history uniformly.
+- Why the summary uses `assistant`: The existing Runtime history protocol only
+  accepts `user` and `assistant`, while `system` is reserved for the Runtime's
+  own instructions. A conspicuous Chinese heading prevents the synthetic
+  assistant entry from looking like a current answer.
+- Why metadata is excluded: Operational fields such as `reasoning_summary`,
+  tool names, Runtime messages, headers, secrets, and raw HTTP responses are not
+  natural conversation. Copying only `role` and `content` prevents them from
+  leaking into prompts or repeatedly influencing tool choices.
+- Avoiding recursive summaries: If the first input entry already begins with
+  the project summary heading, its heading and boilerplate are stripped before
+  the earlier body is merged into a new summary. The output therefore contains
+  at most one generated summary heading instead of nested summaries.
+- Handling extreme messages: The manager caps each old entry, caps the combined
+  summary, then reduces retained messages from oldest to newest. Every output
+  content remains non-empty; if structural overhead alone exceeds a tiny
+  `max_chars`, the manager returns legal messages rather than looping or
+  failing.
+- Limits of basic compression: Character counts do not equal Tokens, and
+  prefix truncation cannot identify semantic importance or consolidate facts.
+  A future policy may add provider-aware Token estimates or higher-quality
+  summaries while preserving the same normalized result boundary.
+- Next Session integration: `SessionAgentService` can later pass recalled
+  `MessageRecord` values through `BasicContextManager.build()` immediately
+  before `runtime.run()`. This keeps persistence complete and leaves the
+  Runtime loop unchanged while bounding only the per-request history.
+
+## 2026-07-13: Stage 06B — Session 自动 Context 构建
+
+- Recall timing: `SessionAgentService.chat()` validates the scope, verifies the
+  Session, loads stored messages, and immediately calls the Context manager.
+  Only the manager's normalized result is passed to the still-stateless Runtime.
+- Why `history_limit` runs first: `history_limit` controls database retrieval,
+  while Context configuration controls compression of the retrieved window.
+  Applying them in that order makes `loaded_history_count` meaningful and
+  prevents the manager from processing data the caller explicitly did not
+  recall.
+- Why SQLite retains full history: Context limits are per-request operational
+  limits, not retention policy. Keeping real user/final-assistant messages
+  intact supports later audits, different compression policies, and rebuilding
+  a better Context without losing source material.
+- Why summaries are not persisted: A deterministic summary can be rebuilt from
+  source messages on every turn. Writing it back would duplicate information,
+  make summaries recursively grow, and mix synthetic content with the user's
+  actual conversation.
+- Why Context statistics are metadata-safe: Counts and approximate sizes help
+  diagnose when compression happened without carrying conversation content.
+  They are scalar operational facts, and the next Context build ignores the
+  entire metadata object.
+- Why summary text stays out of metadata: Persisting the text would duplicate
+  sensitive conversation content and could later be mistaken for authoritative
+  source history. Compressed messages, system prompts, and HTTP details are
+  excluded for the same reason.
+- Avoiding nested summaries: Normal Session operation always rebuilds from raw
+  database messages, where generated summaries never exist. The manager's own
+  one-heading protection remains useful for direct callers and defensive reuse.
+- Context error behavior: `ContextCompressionError` propagates before
+  `runtime.run()` and before `add_exchange()`. The failed request therefore
+  produces no LLM call and no partial user or assistant database row.
+- Tool isolation after compression: Compression changes only history messages.
+  The service still creates `ToolContext` from the validated `user_id` and
+  `session_id`, so persistent tools receive the same scoped identifiers as
+  before integration.
+- Character-compression limitation: Approximate characters are not model Tokens,
+  and prefix truncation does not understand semantic priority. This stage gains
+  deterministic bounds without a tokenizer or summarization LLM, leaving those
+  possible refinements for later work.
