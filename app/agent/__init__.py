@@ -17,6 +17,7 @@ from app.agent.runtime import (
     AgentRuntimeError,
     AgentStep,
 )
+from app.agent.session_service import SessionAgentService, SessionChatResult
 
 __all__ = [
     "ParsedToolCall",
@@ -33,4 +34,6 @@ __all__ = [
     "AgentMaxStepsError",
     "AgentLLMError",
     "AgentDecisionError",
+    "SessionAgentService",
+    "SessionChatResult",
 ]

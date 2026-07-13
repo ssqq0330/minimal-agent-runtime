@@ -5,7 +5,8 @@
 Build a minimal, self-managed Agent runtime step by step without using an Agent
 framework. The project currently includes tools, an OpenAI-compatible HTTP
 client, a structured Agent output parser, a core Agent Runtime loop, SQLite
-storage for Sessions/messages/Todos, and manual real-service demos.
+storage for Sessions/messages/Todos, persisted Session conversations, and
+manual real-service demos.
 
 ## Technology stack
 
@@ -20,8 +21,8 @@ storage for Sessions/messages/Todos, and manual real-service demos.
 The current milestone runs the basic Agent loop: it asks the LLM for a
 structured decision, executes requested registered tools, returns real tool
 results to the model, and stops when the model produces a final answer. A
-standalone SQLite storage layer now persists Sessions, messages, and Todos;
-automatic Runtime history loading remains a later milestone.
+standalone Session service now loads persisted natural-language history into
+the Runtime and atomically saves each successful user/assistant exchange.
 
 ## Run locally
 
@@ -137,6 +138,56 @@ print(result.to_dict())
 same path to read previously saved data. Tests always use pytest `tmp_path`, so
 they do not write to the default database.
 
+## Persisted Session conversations
+
+`SessionAgentService` connects storage to the otherwise stateless Runtime. It
+validates the user and Session, loads history by `(user_id, session_id)`, builds
+the correct `ToolContext`, runs the Agent, and saves the successful exchange.
+`AgentRuntime` does not import or operate `SQLiteStore`, so its LLM/tool loop
+remains independently testable and reusable with other storage backends.
+
+```text
+用户输入
+  ↓
+根据 user_id + session_id 加载历史
+  ↓
+转换为 user/assistant messages
+  ↓
+AgentRuntime Loop
+  ↓
+得到 final
+  ↓
+原子保存 user + assistant
+```
+
+The next Runtime invocation recalls only the user's natural-language messages
+and the assistant's final natural-language answers. Assistant metadata keeps a
+compact operational summary: call counts, unique tool names, stop reason, and
+short `reasoning_summary` values. System prompts, raw tool-call JSON, tool
+results, complete Runtime messages, request headers, API keys, and raw HTTP
+responses are not recalled or stored in that metadata. This keeps context from
+growing rapidly and prevents stale tool results from influencing a new tool
+decision.
+
+The current Session layer supports:
+
+- normal conversational follow-ups;
+- follow-ups after tool use;
+- isolated Sessions for one user;
+- isolation between different users;
+- continuing after Store/Runtime/Service recreation; and
+- persistent Session-scoped Todos.
+
+After configuring `.env`, run the real two-window persistence demo:
+
+```cmd
+python -m scripts.session_memory_demo
+```
+
+The demo uses only `data/session-demo.db`, recreates the application stack
+between turns, and verifies that its two windows retain separate Todo lists.
+It never deletes `data/agent.db`.
+
 ## Current architecture
 
 ```text
@@ -161,5 +212,6 @@ AgentDecision(final/tool_call)
      Return result to LLM and continue
 ```
 
-Runtime history integration, long-term memory, context compression, and
-persistent traces remain future milestones.
+Context summary compression, HTTP Chat/Session routes, the multi-window web UI,
+long-term user memory, and independent persistent traces remain future
+milestones.

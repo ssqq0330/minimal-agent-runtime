@@ -2846,3 +2846,662 @@ python -m pytest tests/test_memory_store.py tests/test_persistent_todo.py -q
 9. 不执行 git commit。
 10. 不执行 git push。
 ```
+
+## 2026-07-13: Stage 05B — Session 历史接入 Agent Runtime
+
+```text
+当前项目已经完成并提交：
+
+stage-01：FastAPI 项目骨架
+stage-02：工具注册机制、calculator、search、todo
+stage-03：真实 LLM Client、结构化输出解析器、Prompt
+stage-04：自行实现 Agent Runtime Loop
+stage-05a：SQLite Session、消息和 Todo 持久化
+
+当前 SQLiteStore 已经能够保存：
+
+- sessions
+- messages
+- todos
+
+AgentRuntime.run 已经支持：
+
+run(
+    user_input: str,
+    context: ToolContext,
+    history: list[dict[str, str]] | None = None
+)
+
+现在开始第五阶段第二部分：把 SQLite Session 历史接入 Agent Runtime，使不同窗口能够独立续聊。
+
+本阶段不实现：
+
+- FastAPI Chat 路由
+- Session HTTP 路由
+- 网页多窗口界面
+- Context 摘要压缩
+- 独立 Trace 数据库表
+- 长期用户画像 Memory
+- git commit
+- git push
+
+项目使用 Python 3.10。
+
+禁止使用 LangChain、LangGraph、OpenAI Agents SDK、OpenHands、OpenClaw 或其他 Agent 框架。
+
+一、总体设计
+
+不要让 AgentRuntime 直接依赖 SQLiteStore。
+
+保持 AgentRuntime 是无状态的核心循环，并新增一个 Session 服务层负责：
+
+1. 验证 user_id 和 session_id。
+2. 检查 Session 是否存在。
+3. 从 SQLite 加载当前 Session 历史。
+4. 转换为 AgentRuntime 所需的 history。
+5. 创建正确的 ToolContext。
+6. 调用 AgentRuntime.run。
+7. 成功后将当前 user 消息和最终 assistant 回答写入 SQLite。
+8. 返回本次运行结果和持久化消息。
+
+这样保持职责分离：
+
+SQLiteStore：
+负责数据读写。
+
+AgentRuntime：
+负责 LLM 与工具循环。
+
+SessionAgentService：
+负责把 Session、历史消息和 Runtime 连接起来。
+
+二、原子保存一轮对话
+
+在 app/memory/store.py 中新增：
+
+add_exchange(
+    user_id: str,
+    session_id: str,
+    user_content: str,
+    assistant_content: str,
+    assistant_metadata: dict[str, Any] | None = None
+) -> tuple[MessageRecord, MessageRecord]
+
+要求：
+
+1. Session 必须存在。
+2. user_content 和 assistant_content 都必须是非空字符串。
+3. assistant_metadata 必须是可 JSON 序列化的 dict 或 None。
+4. 使用同一个 SQLite 事务写入：
+   - 一条 role=user 消息
+   - 一条 role=assistant 消息
+5. 两条消息必须连续写入。
+6. 更新一次 Session.updated_at。
+7. 任意一步失败时整个事务回滚，不能只留下 user 消息。
+8. 返回：
+   - user MessageRecord
+   - assistant MessageRecord
+9. SQL 必须使用参数绑定。
+10. 保持已有 add_message 行为和测试不变。
+11. 可以提取私有辅助方法减少重复，但不能破坏现有接口。
+
+三、SessionChatResult
+
+新增：
+
+app/agent/session_service.py
+
+实现 SessionChatResult 数据类。
+
+字段至少包含：
+
+- session: SessionRecord
+- user_message: MessageRecord
+- assistant_message: MessageRecord
+- agent_result: AgentRunResult
+- loaded_history_count: int
+
+提供：
+
+to_dict() -> dict[str, Any]
+
+to_dict 返回结构应清晰，包括：
+
+{
+  "session": {...},
+  "user_message": {...},
+  "assistant_message": {...},
+  "agent_result": {...},
+  "loaded_history_count": 2
+}
+
+四、SessionAgentService
+
+在 app/agent/session_service.py 中实现：
+
+SessionAgentService(
+    runtime: AgentRuntime,
+    store: SQLiteStore,
+    history_limit: int | None = None
+)
+
+要求：
+
+1. runtime 必须是 AgentRuntime。
+2. store 必须是 SQLiteStore。
+3. history_limit 为 None 时加载当前 Session 的全部历史。
+4. history_limit 不为 None 时必须是大于 0 的整数。
+5. bool 不能被视为合法整数。
+6. 初始化时不调用 LLM。
+7. 初始化时不修改数据库。
+8. 服务不负责关闭 LLM Client。
+
+五、chat 方法
+
+实现：
+
+chat(
+    user_id: str,
+    session_id: str,
+    user_input: str
+) -> SessionChatResult
+
+执行顺序必须是：
+
+1. 校验 user_id。
+2. 校验 session_id。
+3. 校验 user_input。
+4. 使用：
+
+store.get_session(user_id, session_id)
+
+获取 Session。
+
+5. Session 不存在时抛出清晰的 SessionNotFoundError，不能自动创建。
+6. 在写入当前 user_input 之前，加载已有消息：
+
+store.list_messages(
+    user_id,
+    session_id,
+    limit=history_limit
+)
+
+7. 将 MessageRecord 转换为：
+
+[
+  {
+    "role": message.role,
+    "content": message.content
+  }
+]
+
+8. 只能将 user 和 assistant 消息放入 history。
+9. metadata 不进入 LLM Context。
+10. 创建：
+
+ToolContext(
+    user_id=user_id,
+    session_id=session_id
+)
+
+11. 调用：
+
+runtime.run(
+    user_input=user_input,
+    context=tool_context,
+    history=history
+)
+
+12. Runtime 成功返回 final 后，使用 add_exchange 原子保存：
+    - 当前 user_input
+    - agent_result.answer
+
+13. Runtime 发生异常时：
+    - 不保存当前 user 消息
+    - 不保存 assistant 消息
+    - 原有历史不变
+    - 将原异常继续抛出，不要伪装成成功
+
+14. 保存 assistant 消息时，将以下紧凑信息放入 metadata：
+
+{
+  "agent": {
+    "total_llm_calls": 2,
+    "total_tool_calls": 1,
+    "stopped_reason": "final",
+    "used_tools": ["calculator"],
+    "reasoning_summaries": [
+      "需要调用计算器。",
+      "已有计算结果，可以回答。"
+    ]
+  }
+}
+
+要求：
+
+- used_tools 按第一次出现顺序保存
+- 相同工具不要重复
+- 只保存 reasoning_summary
+- 不保存完整内部思维链
+- 不保存 API Key
+- 不保存 Authorization 请求头
+- 不保存完整 system Prompt
+- 不保存完整 Runtime messages
+- 不保存原始 LLM HTTP 响应
+
+15. 返回 SessionChatResult。
+16. 返回的 session 应反映保存消息后的最新 updated_at，可以保存后重新读取。
+17. 不修改 AgentRuntime 返回对象中的 messages。
+18. 不修改数据库中以前的消息。
+
+六、读取历史方法
+
+在 SessionAgentService 中实现：
+
+get_history(
+    user_id: str,
+    session_id: str,
+    limit: int | None = None
+) -> list[MessageRecord]
+
+规则：
+
+1. Session 必须存在。
+2. limit 规则与 SQLiteStore.list_messages 一致。
+3. 只返回当前 user_id + session_id 的消息。
+4. 按旧到新返回。
+5. 不允许读取其他用户相同 session_id 的内容。
+
+七、清空对话方法
+
+实现：
+
+clear_history(
+    user_id: str,
+    session_id: str
+) -> int
+
+规则：
+
+1. Session 必须存在。
+2. 只清除 messages。
+3. 不删除 Session。
+4. 不清除 Todo。
+5. 返回删除的消息数量。
+6. 不能影响其他用户或其他 Session。
+
+八、Context 策略
+
+必须遵守：
+
+持久化并召回到下一轮 Context：
+
+- user 的自然语言输入
+- assistant 的最终自然语言回答
+
+不召回到下一轮 Context：
+
+- system Prompt
+- 历史原始 tool_call JSON
+- 历史工具结果消息
+- 完整 Runtime messages
+- reasoning_summary
+- assistant metadata
+
+本次 Runtime 内部仍然可以使用工具结果继续 Loop。
+
+但 Runtime 结束后，下一轮只加载自然语言 user/assistant 历史。
+
+原因：
+
+1. 避免 Context 快速膨胀。
+2. 避免旧工具结果影响新的工具决策。
+3. 避免反复发送 Tool Schema 和 system Prompt。
+4. 用户真正需要续聊的是自然语言对话状态。
+5. Trace 信息应和对话 Context 分离。
+
+九、Session 隔离
+
+必须严格使用：
+
+user_id + session_id
+
+读取和保存历史。
+
+以下情况必须完全隔离：
+
+1. 同一用户的 window-1 和 window-2。
+2. 不同用户使用相同 session_id。
+3. Todo 工具也必须收到当前 Session 对应的 ToolContext。
+
+不能只使用 session_id 查询数据库。
+
+十、模块导出
+
+更新 app/agent/__init__.py，导出：
+
+- SessionAgentService
+- SessionChatResult
+
+保留已有所有导出。
+
+十一、测试
+
+新增：
+
+tests/test_session_agent_service.py
+
+测试中不能调用真实网络，也不能依赖真实 .env。
+
+使用：
+
+- tmp_path 创建 SQLite 数据库
+- FakeLLMClient 或现有测试辅助
+- 真实 AgentRuntime
+- create_default_registry(todo_store=store)
+
+至少覆盖以下内容。
+
+初始化和校验：
+
+1. 正常初始化。
+2. runtime 类型错误失败。
+3. store 类型错误失败。
+4. history_limit=None 正常。
+5. history_limit 为正整数正常。
+6. history_limit=0 失败。
+7. history_limit 为负数失败。
+8. history_limit=True 失败。
+9. user_id 为空失败。
+10. session_id 为空失败。
+11. user_input 为空失败。
+12. Session 不存在时失败。
+13. Session 不存在时不能自动创建。
+
+第一次对话：
+
+14. 第一次对话加载 0 条历史。
+15. Fake LLM 第一次收到 system 和当前 user 消息。
+16. 成功后数据库新增两条消息。
+17. 第一条消息 role=user。
+18. 第二条消息 role=assistant。
+19. user 内容正确。
+20. assistant 内容正确。
+21. loaded_history_count 等于 0。
+22. assistant metadata 保存调用次数。
+23. assistant metadata 保存工具次数。
+24. assistant metadata 不包含 system Prompt。
+25. assistant metadata 不包含 API Key。
+26. assistant metadata 不包含完整 Runtime messages。
+
+纯对话追问：
+
+27. 完成第一轮后进行第二轮。
+28. 第二轮 loaded_history_count 等于 2。
+29. 第二次 LLM 收到以前的 user 消息。
+30. 第二次 LLM 收到以前的 assistant 消息。
+31. 当前 user_input 位于历史之后。
+32. system Prompt 只出现一次。
+33. 第二轮结束后数据库共有四条消息。
+34. 消息顺序为：
+    - user
+    - assistant
+    - user
+    - assistant
+
+带工具追问：
+
+35. 第一轮 calculator tool_call 后返回 final。
+36. 数据库只保存当前 user 和最终 assistant。
+37. calculator tool_call JSON 不作为单独消息持久化。
+38. calculator 工具结果消息不作为单独消息持久化。
+39. assistant metadata 中 used_tools 包含 calculator。
+40. 下一轮历史不包含原始 tool_call JSON。
+41. 下一轮历史不包含工具结果消息。
+42. 下一轮仍能根据 assistant 最终回答进行自然语言追问。
+
+Todo 与 Session Context：
+
+43. window-1 添加 Todo。
+44. window-2 添加不同 Todo。
+45. window-1 list 只返回 window-1 的 Todo。
+46. window-2 list 只返回 window-2 的 Todo。
+47. ToolContext 使用正确 user_id。
+48. ToolContext 使用正确 session_id。
+
+窗口隔离：
+
+49. 同一用户两个 Session 的历史互不影响。
+50. window-1 的第二轮不包含 window-2 消息。
+51. window-2 的第二轮不包含 window-1 消息。
+52. clear_history(window-1) 不影响 window-2。
+53. clear_history 不删除 Todo。
+
+用户隔离：
+
+54. 用户 A 和用户 B 使用相同 session_id。
+55. 用户 A 无法读取用户 B 的历史。
+56. 用户 B 无法读取用户 A 的历史。
+57. 用户 A 的对话不会进入用户 B 的 LLM Context。
+
+进程重建与持久化：
+
+58. 创建 service-1 完成第一轮。
+59. 重新创建 SQLiteStore。
+60. 重新创建 AgentRuntime。
+61. 重新创建 SessionAgentService。
+62. service-2 能加载 service-1 保存的历史。
+63. 历史顺序正确。
+64. Todo 数据仍存在。
+
+history_limit：
+
+65. 创建多轮历史。
+66. history_limit=2 时只加载最近两条。
+67. 最近两条仍按旧到新传给 Runtime。
+68. history_limit 不影响数据库中实际保存的消息数量。
+
+错误与原子性：
+
+69. Runtime 抛出 AgentLLMError 时不新增消息。
+70. Runtime 抛出 AgentDecisionError 时不新增消息。
+71. Runtime 抛出 AgentMaxStepsError 时不新增消息。
+72. add_exchange 中 assistant 插入失败时 user 插入也回滚。
+73. 成功的一轮总是新增恰好两条消息。
+74. add_exchange 返回连续的消息记录。
+75. add_exchange 更新 Session.updated_at。
+
+结果：
+
+76. SessionChatResult.to_dict 正确。
+77. 返回的 session.updated_at 是最新值。
+78. 返回的 user_message 正确。
+79. 返回的 assistant_message 正确。
+80. 返回的 agent_result 正确。
+81. get_history 正常。
+82. clear_history 返回正确数量。
+
+要求：
+
+1. 所有测试相互隔离。
+2. 不依赖执行顺序。
+3. 不调用真实 LLM API。
+4. 不污染 data/agent.db。
+5. 保留现有全部测试。
+6. 修复全部失败。
+
+十二、真实 Session 演示脚本
+
+新增：
+
+scripts/session_memory_demo.py
+
+运行方式：
+
+python -m scripts.session_memory_demo
+
+使用真实 LLM API和独立演示数据库：
+
+data/session-demo.db
+
+脚本流程：
+
+1. 启动时只清理 session-demo.db、session-demo.db-shm、session-demo.db-wal。
+2. 不能删除 data/agent.db。
+3. 从 .env 加载真实 LLM 配置。
+4. 创建 SQLiteStore("data/session-demo.db")。
+5. 创建两个 Session：
+
+用户：
+
+demo-user
+
+窗口一：
+
+session_id="weather-window"
+title="天气窗口"
+
+窗口二：
+
+session_id="report-window"
+title="周报窗口"
+
+6. 创建：
+
+create_default_registry(todo_store=store)
+
+7. 创建 AgentRuntime。
+8. 创建 SessionAgentService。
+
+窗口一第一轮：
+
+请使用 search 查询东京天气，并把“出门带伞”添加到当前会话的待办中。
+
+窗口二第一轮：
+
+请把“周五前完成周报”添加到当前会话的待办中。
+
+9. 重新创建：
+   - SQLiteStore
+   - ToolRegistry
+   - AgentRuntime
+   - SessionAgentService
+
+模拟程序重新启动。
+
+10. 窗口一追问：
+
+请列出当前窗口的待办，并告诉我刚才查询的是哪个城市。
+
+11. 窗口二追问：
+
+请列出当前窗口的待办。
+
+12. 打印：
+
+- 每个窗口每一轮的最终 answer
+- loaded_history_count
+- LLM calls
+- Tool calls
+- 当前窗口保存的消息
+- 当前窗口保存的 Todo
+
+13. 最后明确打印窗口隔离验证：
+
+weather-window 中应包含“出门带伞”
+report-window 中应包含“周五前完成周报”
+
+14. 不打印 API Key。
+15. 不打印 Authorization 请求头。
+16. 错误时清晰退出并返回非零状态。
+17. 正确关闭 LLM Client。
+18. 脚本运行结束后可以保留 session-demo.db，方便人工查看，但它必须被 .gitignore 忽略。
+
+十三、README
+
+更新 README，增加：
+
+1. SessionAgentService 的职责。
+2. Runtime 与 SQLiteStore 为什么解耦。
+3. Session 对话流程：
+
+用户输入
+  ↓
+根据 user_id + session_id 加载历史
+  ↓
+转换为 user/assistant messages
+  ↓
+AgentRuntime Loop
+  ↓
+得到 final
+  ↓
+原子保存 user + assistant
+
+4. Context 中保存和召回哪些内容。
+5. 为什么不把历史工具结果反复放入 Context。
+6. 如何运行：
+
+python -m scripts.session_memory_demo
+
+7. 当前已经支持：
+   - 纯对话追问
+   - 带工具追问
+   - 多 Session 隔离
+   - 多用户隔离
+   - 程序重启后继续聊
+   - Todo 持久化
+
+8. 当前尚未实现：
+   - Context 摘要压缩
+   - HTTP Chat API
+   - 网页多窗口界面
+   - 独立 Trace 持久化
+
+十四、开发文档
+
+把本阶段完整提示词追加到：
+
+docs/AI_PROMPTS.md
+
+在 docs/PROBLEM_SOLVING.md 记录：
+
+1. 为什么增加 SessionAgentService。
+2. 为什么不让 AgentRuntime 直接操作 SQLite。
+3. history 在什么时候召回。
+4. user 消息为什么不能在 Runtime 成功前提前保存。
+5. 为什么一轮对话需要原子保存。
+6. 哪些信息进入下一轮 Context。
+7. 哪些信息只放 metadata 或 Trace。
+8. 为什么不召回历史工具结果。
+9. 如何实现用户和窗口隔离。
+10. 如何支持纯对话追问。
+11. 如何支持带工具追问。
+12. 如何模拟程序重启后继续对话。
+13. history_limit 的作用。
+14. 下一阶段如何加入 Context 压缩。
+
+十五、限制
+
+1. 不实现 FastAPI 路由。
+2. 不实现网页。
+3. 不实现摘要压缩。
+4. 不实现独立 Trace 表。
+5. 不修改现有 Agent Runtime 的公开行为。
+6. 不修改已有工具 Schema。
+7. 不使用 Agent 框架。
+8. 不自动执行 git commit。
+9. 不自动执行 git push。
+
+十六、完成后
+
+1. 运行完整测试。
+2. 单独运行 Session 服务测试。
+3. 修复全部失败。
+4. 列出创建和修改文件。
+5. 说明一轮 Session 对话如何执行。
+6. 说明数据库保存哪些信息。
+7. 说明下一轮 Context 召回哪些信息。
+8. 给出真实 Session Demo 命令。
+9. 不执行 git commit。
+10. 不执行 git push。
+```

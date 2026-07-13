@@ -171,3 +171,51 @@
 - Why tests use `tmp_path`: Each test receives a separate disposable database,
   has no dependency on execution order, and cannot pollute `data/agent.db` or a
   developer's manual data.
+
+## 2026-07-13: Stage 05B — Session 历史接入 Agent Runtime
+
+- Why add `SessionAgentService`: Persisted conversations require orchestration
+  across validation, history loading, Runtime execution, and atomic storage.
+  Keeping that workflow in one service gives future HTTP handlers a small,
+  testable application boundary.
+- Why Runtime does not operate SQLite: `AgentRuntime` remains the stateless core
+  LLM/tool loop. It can still be tested with plain history and reused with a
+  different store without database branches entering its decision logic.
+- When history is recalled: The service verifies the Session and loads existing
+  messages immediately before `runtime.run`, before the current user message is
+  written. Thus the current input appears exactly once and after prior history.
+- Why the user message is not saved first: A Runtime request can fail because of
+  configuration, networking, parsing, or step limits. Delayed persistence keeps
+  failed attempts from appearing as unanswered conversation turns.
+- Why one exchange is atomic: The user input and final assistant answer are one
+  logical unit. `add_exchange` inserts both in one transaction and updates the
+  Session once, so an assistant insert failure rolls back the user insert too.
+- What enters the next Context: Only persisted natural-language `user` input and
+  final `assistant` answers are converted to Runtime history, always in stored
+  message order.
+- What stays in metadata or future Trace: Counts, stop reason, first-seen unique
+  tool names, and short reasoning summaries are persisted as compact assistant
+  metadata. Full Runtime messages, prompts, tool payloads, headers, secrets, and
+  raw HTTP responses are excluded; richer diagnostics belong in a future Trace.
+- Why historical tool results are not recalled: Tool payloads can be large,
+  stale, and overly influential. The assistant's final natural-language answer
+  preserves the user-visible outcome without repeatedly expanding Context.
+- User and window isolation: Every service operation and every persistent tool
+  call carries both `user_id` and `session_id`. The Store's composite keys and
+  bound predicates enforce that pair at the database boundary.
+- Normal follow-ups: A direct final answer is atomically saved with the question;
+  the next request receives that pair before its new input, enabling ordinary
+  conversational continuity.
+- Tool-assisted follow-ups: Tool calls/results remain available inside the
+  current Runtime loop. After final, only the question, answer, and compact
+  metadata persist, so the next request follows the natural-language result.
+- Simulated restart: Tests and the manual demo rebuild `SQLiteStore`, registry,
+  Runtime, and service against the same database path. Short-lived SQLite
+  connections make the reconstructed stack see the previously committed data.
+- Purpose of `history_limit`: It bounds only how many recent stored messages are
+  supplied to a Runtime invocation. It does not delete or truncate database
+  history, and the selected messages remain ordered from old to new.
+- Future Context compression: A later layer can inspect message count or token
+  estimates, summarize older natural-language turns, and combine that summary
+  with recent messages before Runtime execution without changing the Runtime or
+  the atomic exchange contract.

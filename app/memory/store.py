@@ -350,6 +350,86 @@ class SQLiteStore:
             metadata=metadata,
         )
 
+    def add_exchange(
+        self,
+        user_id: str,
+        session_id: str,
+        user_content: str,
+        assistant_content: str,
+        assistant_metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[MessageRecord, MessageRecord]:
+        """Atomically store one user message and its final assistant answer."""
+        user_id, session_id = self._validate_scope(user_id, session_id)
+        user_content = self._validate_text(user_content, "user_content")
+        assistant_content = self._validate_text(
+            assistant_content,
+            "assistant_content",
+        )
+        metadata_json = self._serialize_metadata(assistant_metadata)
+        stored_metadata = (
+            json.loads(metadata_json) if metadata_json is not None else None
+        )
+        timestamp = self._now()
+
+        with self._lock:
+            try:
+                with self._connection(write=True) as connection:
+                    self._require_session(connection, user_id, session_id)
+                    user_cursor = connection.execute(
+                        """
+                        INSERT INTO messages (
+                            user_id, session_id, role, content,
+                            metadata_json, created_at
+                        ) VALUES (?, ?, 'user', ?, NULL, ?)
+                        """,
+                        (user_id, session_id, user_content, timestamp),
+                    )
+                    assistant_cursor = connection.execute(
+                        """
+                        INSERT INTO messages (
+                            user_id, session_id, role, content,
+                            metadata_json, created_at
+                        ) VALUES (?, ?, 'assistant', ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            session_id,
+                            assistant_content,
+                            metadata_json,
+                            timestamp,
+                        ),
+                    )
+                    self._touch_session_row(
+                        connection,
+                        user_id,
+                        session_id,
+                        timestamp,
+                    )
+                    user_message_id = int(user_cursor.lastrowid)
+                    assistant_message_id = int(assistant_cursor.lastrowid)
+            except sqlite3.Error as error:
+                raise MemoryStoreError("Failed to save the conversation exchange.") from error
+
+        return (
+            MessageRecord(
+                id=user_message_id,
+                user_id=user_id,
+                session_id=session_id,
+                role="user",
+                content=user_content,
+                created_at=timestamp,
+            ),
+            MessageRecord(
+                id=assistant_message_id,
+                user_id=user_id,
+                session_id=session_id,
+                role="assistant",
+                content=assistant_content,
+                created_at=timestamp,
+                metadata=stored_metadata,
+            ),
+        )
+
     def list_messages(
         self,
         user_id: str,
